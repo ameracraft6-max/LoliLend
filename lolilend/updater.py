@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import fnmatch
+import html
 import os
 from pathlib import Path
 import re
 import subprocess
 from typing import Any, Callable
+from urllib.parse import unquote
 
 import requests
 
@@ -86,12 +88,31 @@ def fetch_latest_release(
         raise UpdateError("GitHub repo is not configured.")
 
     client = session or requests
-    url = f"https://api.github.com/repos/{repo}/releases"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "LoliLend-Launcher-Updater",
-    }
-    response = client.get(url, headers=headers, timeout=timeout)
+    headers = _github_api_headers()
+
+    if config.stable_only:
+        api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+        response = client.get(api_url, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise UpdateError("GitHub API returned an unexpected payload.")
+            return _release_from_payload(payload, config)
+        if response.status_code == 404:
+            return None
+        if response.status_code == 403:
+            fallback = _fetch_latest_release_via_web(repo, config, client=client, timeout=timeout)
+            if fallback is not None:
+                return fallback
+            raise UpdateError("GitHub API request failed with status 403.")
+        raise UpdateError(f"GitHub API request failed with status {response.status_code}.")
+
+    api_url = f"https://api.github.com/repos/{repo}/releases"
+    response = client.get(api_url, headers=headers, timeout=timeout)
+    if response.status_code == 403:
+        fallback = _fetch_latest_release_via_web(repo, config, client=client, timeout=timeout)
+        if fallback is not None:
+            return fallback
     if response.status_code >= 400:
         raise UpdateError(f"GitHub API request failed with status {response.status_code}.")
 
@@ -104,29 +125,9 @@ def fetch_latest_release(
 def select_latest_release(releases_payload: list[dict[str, Any]], config: ReleaseConfig) -> ReleaseInfo | None:
     best: ReleaseInfo | None = None
     for release in releases_payload:
-        if not isinstance(release, dict):
+        info = _release_from_payload(release, config)
+        if info is None:
             continue
-        if bool(release.get("draft", False)):
-            continue
-        if config.stable_only and bool(release.get("prerelease", False)):
-            continue
-
-        tag = str(release.get("tag_name") or release.get("name") or "").strip()
-        version = normalize_version(tag)
-        if parse_semver(version) is None:
-            continue
-
-        asset = _select_asset(release.get("assets"), config.asset_pattern)
-        if asset is None:
-            continue
-        published_at = str(release.get("published_at") or "")
-        info = ReleaseInfo(
-            version=version,
-            tag=tag,
-            asset_name=asset["name"],
-            asset_url=asset["url"],
-            published_at=published_at,
-        )
         if best is None or is_newer_version(info.version, best.version):
             best = info
     return best
@@ -237,6 +238,108 @@ def _select_asset(assets_payload: Any, pattern: str) -> dict[str, str] | None:
             continue
         return {"name": name, "url": url}
     return None
+
+
+def _release_from_payload(release_payload: Any, config: ReleaseConfig) -> ReleaseInfo | None:
+    if not isinstance(release_payload, dict):
+        return None
+    if bool(release_payload.get("draft", False)):
+        return None
+    if config.stable_only and bool(release_payload.get("prerelease", False)):
+        return None
+
+    tag = str(release_payload.get("tag_name") or release_payload.get("name") or "").strip()
+    version = normalize_version(tag)
+    if parse_semver(version) is None:
+        return None
+
+    asset = _select_asset(release_payload.get("assets"), config.asset_pattern)
+    if asset is None:
+        return None
+    published_at = str(release_payload.get("published_at") or "")
+    return ReleaseInfo(
+        version=version,
+        tag=tag,
+        asset_name=asset["name"],
+        asset_url=asset["url"],
+        published_at=published_at,
+    )
+
+
+def _fetch_latest_release_via_web(
+    repo: str,
+    config: ReleaseConfig,
+    *,
+    client: requests.Session | Any,
+    timeout: float,
+) -> ReleaseInfo | None:
+    headers = {"User-Agent": "LoliLend-Launcher-Updater"}
+    latest_url = f"https://github.com/{repo}/releases/latest"
+    latest_response = client.get(latest_url, headers=headers, timeout=timeout, allow_redirects=True)
+    if latest_response.status_code >= 400:
+        return None
+
+    tag = _extract_tag_from_url(str(getattr(latest_response, "url", "")).strip())
+    if not tag:
+        return None
+    version = normalize_version(tag)
+    if parse_semver(version) is None:
+        return None
+
+    expanded_assets_url = f"https://github.com/{repo}/releases/expanded_assets/{tag}"
+    assets_response = client.get(expanded_assets_url, headers=headers, timeout=timeout)
+    assets_html = ""
+    if assets_response.status_code < 400:
+        assets_html = str(getattr(assets_response, "text", ""))
+    if not assets_html:
+        assets_html = str(getattr(latest_response, "text", ""))
+
+    asset = _select_asset_from_html(assets_html, config.asset_pattern)
+    if asset is None:
+        return None
+
+    return ReleaseInfo(
+        version=version,
+        tag=tag,
+        asset_name=asset["name"],
+        asset_url=asset["url"],
+        published_at="",
+    )
+
+
+def _extract_tag_from_url(url: str) -> str:
+    marker = "/releases/tag/"
+    idx = url.find(marker)
+    if idx < 0:
+        return ""
+    return url[idx + len(marker) :].strip().strip("/")
+
+
+def _select_asset_from_html(page_html: str, pattern: str) -> dict[str, str] | None:
+    matches = re.finditer(
+        r'href="(?P<href>/[^"#?]+/releases/download/[^"#?]+/(?P<name>[^"#?]+))"',
+        page_html,
+        flags=re.IGNORECASE,
+    )
+    for match in matches:
+        href = html.unescape(match.group("href"))
+        encoded_name = match.group("name")
+        asset_name = unquote(encoded_name)
+        if not fnmatch.fnmatch(asset_name, pattern):
+            continue
+        return {"name": asset_name, "url": f"https://github.com{href}"}
+    return None
+
+
+def _github_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "LoliLend-Launcher-Updater",
+    }
+    token = os.getenv("LOLILEND_GITHUB_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _sanitize_repo(value: str) -> str:

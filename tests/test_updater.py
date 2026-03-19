@@ -2,15 +2,40 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from typing import Any
 
 from lolilend.updater import (
     ReleaseConfig,
     build_install_and_relaunch_command,
     build_silent_install_command,
+    fetch_latest_release,
     is_newer_version,
     parse_semver,
     select_latest_release,
 )
+
+
+class _FakeResponse:
+    def __init__(self, *, status_code: int, payload: Any = None, text: str = "", url: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+        self.url = url
+        self.headers: dict[str, str] = {}
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, mapping: dict[str, _FakeResponse]) -> None:
+        self._mapping = mapping
+
+    def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+        del kwargs
+        if url not in self._mapping:
+            raise AssertionError(f"Unexpected URL call: {url}")
+        return self._mapping[url]
 
 
 class UpdaterHelpersTests(unittest.TestCase):
@@ -69,6 +94,58 @@ class UpdaterHelpersTests(unittest.TestCase):
         self.assertIn("VERYSILENT", command)
         self.assertIn("start \"\"", command)
         self.assertIn("LoliLend.exe", command)
+
+    def test_fetch_latest_release_uses_latest_endpoint_for_stable(self) -> None:
+        config = ReleaseConfig(repo="example/repo", asset_pattern="LoliLend-Setup-*.exe", stable_only=True)
+        session = _FakeSession(
+            {
+                "https://api.github.com/repos/example/repo/releases/latest": _FakeResponse(
+                    status_code=200,
+                    payload={
+                        "tag_name": "v2.2.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "assets": [
+                            {
+                                "name": "LoliLend-Setup-2.2.0.exe",
+                                "browser_download_url": "https://github.com/example/repo/releases/download/v2.2.0/LoliLend-Setup-2.2.0.exe",
+                            }
+                        ],
+                        "published_at": "2026-03-19T10:00:00Z",
+                    },
+                )
+            }
+        )
+        release = fetch_latest_release(config, session=session)
+        self.assertIsNotNone(release)
+        assert release is not None
+        self.assertEqual(release.version, "2.2.0")
+        self.assertEqual(release.asset_name, "LoliLend-Setup-2.2.0.exe")
+
+    def test_fetch_latest_release_fallbacks_to_web_on_403(self) -> None:
+        config = ReleaseConfig(repo="example/repo", asset_pattern="LoliLend-Setup-*.exe", stable_only=True)
+        session = _FakeSession(
+            {
+                "https://api.github.com/repos/example/repo/releases/latest": _FakeResponse(status_code=403),
+                "https://github.com/example/repo/releases/latest": _FakeResponse(
+                    status_code=200,
+                    url="https://github.com/example/repo/releases/tag/v2.0.1",
+                ),
+                "https://github.com/example/repo/releases/expanded_assets/v2.0.1": _FakeResponse(
+                    status_code=200,
+                    text='<a href="/example/repo/releases/download/v2.0.1/LoliLend-Setup-2.0.1.exe">download</a>',
+                ),
+            }
+        )
+        release = fetch_latest_release(config, session=session)
+        self.assertIsNotNone(release)
+        assert release is not None
+        self.assertEqual(release.version, "2.0.1")
+        self.assertEqual(release.asset_name, "LoliLend-Setup-2.0.1.exe")
+        self.assertEqual(
+            release.asset_url,
+            "https://github.com/example/repo/releases/download/v2.0.1/LoliLend-Setup-2.0.1.exe",
+        )
 
 
 if __name__ == "__main__":
