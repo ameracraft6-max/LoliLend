@@ -1,0 +1,2 @@
+"""LoliLend desktop UI package."""
+

@@ -1,0 +1,6 @@
+<svg width="220" height="54" viewBox="0 0 220 54" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <rect x="1" y="1" width="52" height="52" rx="26" stroke="#dfe5ef" stroke-opacity="0.35"/>
+  <path d="M17 20c0-6 5-10 10-10 4 0 7 2 9 5" stroke="#dfe5ef" stroke-width="2"/>
+  <path d="M15 26c0-2 2-4 4-4h16c2 0 4 2 4 4v8c0 6-5 11-11 11h-2c-6 0-11-5-11-11z" stroke="#dfe5ef" stroke-width="2"/>
+  <text x="66" y="35" fill="#dfe5ef" fill-opacity="0.75" font-family="Rajdhani Medium, Arial" font-size="28" font-weight="700">LOLILEND</text>
+</svg>

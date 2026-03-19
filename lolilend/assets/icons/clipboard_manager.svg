@@ -1,0 +1,10 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#dfe5ef" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Clipboard body -->
+  <rect x="14" y="14" width="36" height="44" rx="3"/>
+  <!-- Clipboard clip -->
+  <rect x="24" y="8" width="16" height="12" rx="3"/>
+  <!-- Lines -->
+  <line x1="22" y1="30" x2="42" y2="30"/>
+  <line x1="22" y1="38" x2="42" y2="38"/>
+  <line x1="22" y1="46" x2="34" y2="46"/>
+</svg>
