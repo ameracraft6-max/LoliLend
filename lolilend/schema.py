@@ -106,27 +106,27 @@ tabs_schema: list[TabSpec] = [
     ),
     TabSpec(
         id="fps",
-        title="FPS РјРѕРЅРёС‚РѕСЂ",
+        title="FPS монитор",
         icon="fps",
         sections=[
             SectionSpec(
-                title="FPS РјРѕРЅРёС‚РѕСЂРёРЅРі",
+                title="FPS мониторинг",
                 controls=[
-                    ControlSpec("checkbox", "РђРІС‚РѕРІС‹Р±РѕСЂ Р°РєС‚РёРІРЅРѕРіРѕ РѕРєРЅР°", default=True),
-                    ControlSpec("button", "Р—Р°РїСѓСЃС‚РёС‚СЊ FPS Р·Р°С…РІР°С‚"),
-                    ControlSpec("button", "РћСЃС‚Р°РЅРѕРІРёС‚СЊ FPS Р·Р°С…РІР°С‚"),
+                    ControlSpec("checkbox", "Автовыбор активного окна", default=True),
+                    ControlSpec("button", "Запустить FPS захват"),
+                    ControlSpec("button", "Остановить FPS захват"),
                 ],
             ),
             SectionSpec(
                 title="Overlay",
                 controls=[
-                    ControlSpec("button", "Р—Р°РїСѓСЃС‚РёС‚СЊ overlay"),
-                    ControlSpec("button", "РћСЃС‚Р°РЅРѕРІРёС‚СЊ overlay"),
-                    ControlSpec("combo", "РџРѕР·РёС†РёСЏ overlay", default="top_left", options={"items": ["top_left", "top_right", "bottom_left", "bottom_right"]}),
+                    ControlSpec("button", "Запустить overlay"),
+                    ControlSpec("button", "Остановить overlay"),
+                    ControlSpec("combo", "Позиция overlay", default="top_left", options={"items": ["top_left", "top_right", "bottom_left", "bottom_right"]}),
                 ],
             ),
             SectionSpec(
-                title="Р”РёР°РіРЅРѕСЃС‚РёРєР°",
+                title="Диагностика",
                 controls=[
                     ControlSpec("checkbox", "Windows only", default=True),
                 ],
@@ -225,6 +225,12 @@ tabs_schema: list[TabSpec] = [
                 controls=[],
             ),
         ],
+    ),
+    TabSpec(
+        id="yandex_music_rpc",
+        title="Яндекс Музыка",
+        icon="yandex_music_rpc",
+        sections=[],
     ),
     TabSpec(
         id="security",

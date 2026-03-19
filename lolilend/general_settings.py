@@ -35,7 +35,7 @@ class GeneralSettings:
     interface_scale: int = 100
     font_size: int = 13
     panel_opacity: int = 86
-    sidebar_width: int = 102
+    sidebar_width: int = 175
     compact_mode: bool = False
     show_status_bar: bool = False
     active_ai: str = "AI LOLILEND"
@@ -85,7 +85,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "interface_scale": 100,
         "font_size": 13,
         "panel_opacity": 86,
-        "sidebar_width": 102,
+        "sidebar_width": 175,
         "compact_mode": False,
         "show_status_bar": False,
         "active_ai": "AI LOLILEND",
@@ -123,7 +123,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "interface_scale": 96,
         "font_size": 12,
         "panel_opacity": 80,
-        "sidebar_width": 94,
+        "sidebar_width": 175,
         "compact_mode": True,
         "show_status_bar": False,
         "active_ai": "AI LOLILEND",
@@ -161,7 +161,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "interface_scale": 92,
         "font_size": 12,
         "panel_opacity": 74,
-        "sidebar_width": 90,
+        "sidebar_width": 175,
         "compact_mode": True,
         "show_status_bar": False,
         "active_ai": "AI LOLILEND",
@@ -222,7 +222,7 @@ class GeneralSettingsStore:
         settings.interface_scale = self._clamp_int(settings_raw.get("interface_scale", settings.interface_scale), 85, 130)
         settings.font_size = self._clamp_int(settings_raw.get("font_size", settings.font_size), 11, 18)
         settings.panel_opacity = self._clamp_int(settings_raw.get("panel_opacity", settings.panel_opacity), 60, 100)
-        settings.sidebar_width = self._clamp_int(settings_raw.get("sidebar_width", settings.sidebar_width), 82, 160)
+        settings.sidebar_width = self._clamp_int(settings_raw.get("sidebar_width", settings.sidebar_width), 140, 260)
         settings.compact_mode = bool(settings_raw.get("compact_mode", settings.compact_mode))
         settings.show_status_bar = bool(settings_raw.get("show_status_bar", settings.show_status_bar))
         settings.active_ai = str(settings_raw.get("active_ai", settings.active_ai))
@@ -431,7 +431,7 @@ class GeneralSettingsStore:
             "interface_scale": self._clamp_int(values.get("interface_scale", 100), 85, 130),
             "font_size": self._clamp_int(values.get("font_size", 13), 11, 18),
             "panel_opacity": self._clamp_int(values.get("panel_opacity", 86), 60, 100),
-            "sidebar_width": self._clamp_int(values.get("sidebar_width", 102), 82, 160),
+            "sidebar_width": self._clamp_int(values.get("sidebar_width", 175), 140, 260),
             "compact_mode": bool(values.get("compact_mode", False)),
             "show_status_bar": bool(values.get("show_status_bar", False)),
             "active_ai": active_ai,

@@ -12,11 +12,29 @@ def _int_setting(settings: Mapping[str, object], key: str, default: int, min_val
     return max(min_value, min(max_value, value))
 
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+
+_ACCENT_MAP: dict[str, tuple[str, str, str, str, str]] = {
+    "Rose":  ("#c0392b", "#e74c3c", "#922b21", "#4a1511", "#7b241c"),
+    "Cyan":  ("#1a7fa8", "#2da8d8", "#155f80", "#0a2e3d", "#113349"),
+    "Lime":  ("#9db35a", "#b8cc72", "#7a8e40", "#2a3518", "#394a1e"),
+    "Amber": ("#c97a1e", "#e8922a", "#9a5c12", "#3d2508", "#5a3510"),
+}
+
+
 def app_stylesheet(settings: Mapping[str, object] | None = None) -> str:
     raw_settings = settings or {}
     font_size = _int_setting(raw_settings, "font_size", 13, 11, 18)
     table_header_font = max(11, font_size - 1)
     metric_value_font = max(14, font_size + 3)
+
+    _accent = _ACCENT_MAP.get(str(raw_settings.get("accent_preset", "Rose")), _ACCENT_MAP["Rose"])
+    accent_primary, accent_bright, accent_deep, accent_dim, accent_muted = _accent
+    accent_dim_rgba = _hex_to_rgba(accent_dim, 0.20)
 
     return f"""
 QWidget {{
@@ -24,7 +42,7 @@ QWidget {{
     color: #d6d9de;
     font-family: "Rajdhani Medium", "Bahnschrift SemiCondensed", "Arial Narrow", "Segoe UI";
     font-size: {font_size}px;
-    selection-background-color: #213423;
+    selection-background-color: {accent_dim};
 }}
 QMainWindow {{
     background: #020406;
@@ -43,7 +61,7 @@ QFrame#MainFrame {{
     border: 1px solid #2a2f36;
 }}
 QFrame#AccentLine {{
-    background: #9db35a;
+    background: {accent_primary};
     border: none;
 }}
 QFrame#ShellBody {{
@@ -51,38 +69,67 @@ QFrame#ShellBody {{
     border: none;
 }}
 QFrame#SidebarFrame {{
-    background: rgba(5, 7, 10, 228);
-    border: 1px solid #262b31;
+    background: rgba(4, 6, 9, 245);
+    border: none;
+    border-right: 1px solid #1e2228;
 }}
 QFrame#ContentFrame {{
     background: rgba(5, 7, 10, 206);
     border: 1px solid #262b31;
 }}
 QToolButton#NavButton {{
-    background: #070a0d;
-    border: 1px solid #2a2f36;
-    border-radius: 27px;
-    padding: 4px;
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: 0px;
+    padding: 6px 12px 6px 10px;
+    text-align: left;
+    color: #8a9099;
+    font-size: {font_size}px;
+    font-weight: 600;
 }}
 QToolButton#NavButton:hover {{
-    border: 1px solid #515966;
-    background: #0b1016;
+    background: rgba(255, 255, 255, 8);
+    border-left: 3px solid {accent_muted};
+    color: #c8cdd6;
 }}
 QToolButton#NavButton:checked {{
-    border: 1px solid #9db35a;
-    background: #11150f;
+    background: {accent_dim_rgba};
+    border-left: 3px solid {accent_bright};
+    color: #ffffff;
+    font-weight: 700;
 }}
 QFrame#NavSeparator {{
     border: none;
-    background: #242930;
+    background: #1a1f26;
+    margin: 4px 0px;
 }}
 QFrame#NavProfileSlot {{
-    background: #070a0d;
-    border: 1px solid #2a2f36;
-    border-radius: 26px;
+    background: rgba(255, 255, 255, 4);
+    border: none;
+    border-top: 1px solid #1e2228;
 }}
 QLabel#NavProfileIcon {{
     color: #8f98a8;
+}}
+QLabel#SidebarBrand {{
+    color: #ffffff;
+    font-size: {max(15, font_size + 3)}px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 0px 4px;
+}}
+QLabel#SidebarBrandSub {{
+    color: {accent_primary};
+    font-size: {max(9, font_size - 3)}px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    padding: 0px 4px;
+}}
+QFrame#SidebarBrandBlock {{
+    border: none;
+    border-bottom: 1px solid #1e2228;
+    background: transparent;
 }}
 QGroupBox,
 QGroupBox#RefPanelBox {{
@@ -116,8 +163,8 @@ QCheckBox::indicator {{
     background: #0b1016;
 }}
 QCheckBox::indicator:checked {{
-    background: #8daa47;
-    border: 1px solid #9eb95b;
+    background: {accent_primary};
+    border: 1px solid {accent_bright};
 }}
 QFrame#RefSwatch {{
     background: #dfe5ef;
@@ -142,6 +189,21 @@ QPushButton:pressed {{
 QPushButton#LinkOpenButton,
 QPushButton#LinkCopyButton {{
     min-width: 108px;
+}}
+QPushButton#PrimaryButton {{
+    background: {accent_primary};
+    border: 1px solid {accent_bright};
+    color: #ffffff;
+    font-weight: 700;
+    min-height: 26px;
+    padding: 2px 12px;
+}}
+QPushButton#PrimaryButton:hover {{
+    background: {accent_bright};
+    border: 1px solid {accent_bright};
+}}
+QPushButton#PrimaryButton:pressed {{
+    background: {accent_deep};
 }}
 QMenu {{
     background: #0c1016;
@@ -182,7 +244,7 @@ QComboBox::drop-down {{
 QComboBox QAbstractItemView {{
     background: #0d1117;
     border: 1px solid #404957;
-    selection-background-color: #1f2d1f;
+    selection-background-color: {accent_dim};
 }}
 QLineEdit {{
     min-height: 22px;
@@ -191,7 +253,7 @@ QLineEdit {{
     padding: 0 6px;
 }}
 QLineEdit:focus {{
-    border: 1px solid #8daa47;
+    border: 1px solid {accent_primary};
 }}
 QSlider::groove:horizontal {{
     border: 1px solid #323844;
@@ -199,7 +261,7 @@ QSlider::groove:horizontal {{
     background: #0f141b;
 }}
 QSlider::sub-page:horizontal {{
-    background: #8daa47;
+    background: {accent_primary};
 }}
 QSlider::add-page:horizontal {{
     background: #0f141b;
@@ -249,7 +311,7 @@ QTableWidget {{
     alternate-background-color: #101621;
     border: 1px solid #313846;
     gridline-color: #222a34;
-    selection-background-color: #26321f;
+    selection-background-color: {accent_dim};
 }}
 QHeaderView::section {{
     background: #121922;
@@ -296,15 +358,15 @@ QListWidget#AiSessionsList::item {{
     padding: 6px 8px;
 }}
 QListWidget#AiSessionsList::item:selected {{
-    background: #1f2d1f;
+    background: {accent_dim};
 }}
 QScrollArea#AiMessagesScroll {{
     border: 1px solid #313846;
     background: #0d1117;
 }}
 QFrame#AiMessageBubbleUser {{
-    background: #1a2c1c;
-    border: 1px solid #48624a;
+    background: {accent_dim};
+    border: 1px solid {accent_muted};
 }}
 QFrame#AiMessageBubbleAssistant {{
     background: #131a24;
@@ -315,6 +377,6 @@ QPlainTextEdit#AiSystemPrompt {{
     background: #0d1117;
     border: 1px solid #313846;
     color: #d6d9de;
-    selection-background-color: #26321f;
+    selection-background-color: {accent_dim};
 }}
 """

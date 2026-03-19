@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QSlider,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
 from lolilend.ai_ui import AiTabPage
 from lolilend.analytics import AnalyticsSummary, GameAnalyticsService, LiveGameEntry, TopGameEntry, format_duration
 from lolilend.discord_quests import DiscordQuestService
+from lolilend.yandex_music_rpc import YandexMusicRpcConfig, YandexMusicRpcService, YandexMusicRpcStore
 from lolilend.fps_monitor import FpsMonitorService, FpsSnapshot, STATUS_WINDOWS_ONLY
 from lolilend.fps_overlay import FpsOverlayWindow
 from lolilend.general_settings import GeneralSettings, GeneralSettingsStore
@@ -844,7 +847,7 @@ class AdvancedGeneralTabPage(QWidget):
         self.interface_scale_slider, self.interface_scale_value_label = self._create_slider_control("Масштаб интерфейса", "%", 85, 130, left_layout)
         self.font_size_slider, self.font_size_value_label = self._create_slider_control("Размер шрифта", "px", 11, 18, left_layout)
         self.panel_opacity_slider, self.panel_opacity_value_label = self._create_slider_control("Насыщенность панелей", "%", 60, 100, left_layout)
-        self.sidebar_width_slider, self.sidebar_width_value_label = self._create_slider_control("Ширина боковой панели", "px", 82, 160, left_layout)
+        self.sidebar_width_slider, self.sidebar_width_value_label = self._create_slider_control("Ширина боковой панели", "px", 140, 260, left_layout)
 
         accent_title = QLabel("Акцентная тема")
         accent_title.setProperty("role", "ref_section")
@@ -1754,6 +1757,240 @@ class TelegramProxyTabPage(QWidget):
         self._stop_proxy()
         return not self._service.is_running()
 
+
+
+class YandexMusicRpcTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None], service: YandexMusicRpcService) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = service
+        self._store = YandexMusicRpcStore()
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter)
+
+        # ---- Left panel: controls ----
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setMinimumWidth(260)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(10)
+        left_scroll.setWidget(left_widget)
+
+        # Enable toggle
+        enable_box = QGroupBox("Discord RPC")
+        enable_layout = QVBoxLayout(enable_box)
+        self._enable_cb = QCheckBox("Включить отображение трека в Discord")
+        enable_layout.addWidget(self._enable_cb)
+        left_layout.addWidget(enable_box)
+
+        # Yandex Music token
+        ym_box = QGroupBox("Яндекс Музыка")
+        ym_layout = QVBoxLayout(ym_box)
+        ym_layout.addWidget(QLabel("Токен (опционально — для обложек и ссылок):"))
+        self._token_edit = QLineEdit()
+        self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._token_edit.setPlaceholderText("y0_AgAA...")
+        ym_layout.addWidget(self._token_edit)
+        token_save_btn = QPushButton("Сохранить токен")
+        token_save_btn.clicked.connect(self._save_token)
+        ym_layout.addWidget(token_save_btn)
+        hint_label = QLabel(
+            "Как получить токен: откройте music.yandex.ru,\n"
+            "затем в консоли браузера выполните:\n"
+            "document.cookie.match(/Session_id=([^;]+)/)[1]"
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setProperty("role", "metric_note")
+        ym_layout.addWidget(hint_label)
+        left_layout.addWidget(ym_box)
+
+        # Settings
+        settings_box = QGroupBox("Настройки")
+        settings_layout = QVBoxLayout(settings_box)
+        settings_layout.addWidget(QLabel("Источник звука:"))
+        self._source_combo = QComboBox()
+        self._source_combo.addItem("Авто (любой источник)", "auto")
+        settings_layout.addWidget(self._source_combo)
+        self._strong_find_cb = QCheckBox("Строгий поиск (только Яндекс Музыка)")
+        self._strong_find_cb.setToolTip(
+            "Если включено, поиск выполняется без автокоррекции.\n"
+            "Полезно когда играет только ЯМ."
+        )
+        settings_layout.addWidget(self._strong_find_cb)
+        apply_btn = QPushButton("Применить настройки")
+        apply_btn.clicked.connect(self._apply_settings)
+        settings_layout.addWidget(apply_btn)
+        left_layout.addWidget(settings_box)
+
+        left_layout.addStretch(1)
+
+        # ---- Right panel: status ----
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(10)
+        right_scroll.setWidget(right_widget)
+
+        # Current track
+        track_box = QGroupBox("Текущий трек")
+        track_layout = QVBoxLayout(track_box)
+        self._track_title = QLabel("—")
+        self._track_title.setProperty("role", "metric_value")
+        self._track_title.setWordWrap(True)
+        track_layout.addWidget(self._track_title)
+        self._track_artist = QLabel("—")
+        track_layout.addWidget(self._track_artist)
+        self._track_album = QLabel("")
+        self._track_album.setProperty("role", "metric_note")
+        self._track_album.setWordWrap(True)
+        track_layout.addWidget(self._track_album)
+        self._track_url = QLabel("")
+        self._track_url.setProperty("role", "security_url")
+        self._track_url.setWordWrap(True)
+        track_layout.addWidget(self._track_url)
+        right_layout.addWidget(track_box)
+
+        # Discord status
+        discord_box = QGroupBox("Discord RPC")
+        discord_layout = QVBoxLayout(discord_box)
+        self._discord_status = QLabel("Отключён")
+        discord_layout.addWidget(self._discord_status)
+        right_layout.addWidget(discord_box)
+
+        # Error label
+        self._error_label = QLabel("")
+        self._error_label.setProperty("role", "metric_note")
+        self._error_label.setWordWrap(True)
+        right_layout.addWidget(self._error_label)
+
+        # Log
+        log_box = QGroupBox("Журнал")
+        log_layout = QVBoxLayout(log_box)
+        self._log_list = QListWidget()
+        self._log_list.setMaximumHeight(200)
+        self._log_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        log_layout.addWidget(self._log_list)
+        right_layout.addWidget(log_box)
+        right_layout.addStretch(1)
+
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(right_scroll)
+        splitter.setSizes([300, 500])
+
+        # Timer
+        self._timer = QTimer(self)
+        self._timer.setInterval(3000)
+        self._timer.timeout.connect(self._refresh)
+
+        # Wire signals
+        self._enable_cb.toggled.connect(self._on_enable_toggled)
+
+        # Load initial state
+        self._load_ui_state()
+        self._refresh()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def on_shown(self) -> None:
+        self._refresh()
+        self._timer.start()
+
+    def on_hidden(self) -> None:
+        self._timer.stop()
+
+    # ------------------------------------------------------------------
+    # UI actions
+    # ------------------------------------------------------------------
+
+    def _load_ui_state(self) -> None:
+        cfg = self._store.load()
+        self._enable_cb.blockSignals(True)
+        self._enable_cb.setChecked(cfg.enabled)
+        self._enable_cb.blockSignals(False)
+        self._strong_find_cb.setChecked(cfg.strong_find)
+        # Load token (masked)
+        token = self._store.load_token()
+        if token:
+            self._token_edit.setPlaceholderText("Токен сохранён (введите новый для замены)")
+
+    def _on_enable_toggled(self, checked: bool) -> None:
+        cfg = self._store.load()
+        cfg.enabled = checked
+        self._service.update_config(cfg)
+        self._on_status("Яндекс Музыка RPC " + ("включён" if checked else "отключён"))
+        self._refresh()
+
+    def _save_token(self) -> None:
+        token = self._token_edit.text().strip()
+        if not token:
+            self._on_status("Токен не введён")
+            return
+        ok = self._store.save_token(token)
+        self._service.reload_ym_client()
+        self._token_edit.clear()
+        self._token_edit.setPlaceholderText("Токен сохранён (введите новый для замены)")
+        self._on_status("Токен ЯМ сохранён" if ok else "Ошибка сохранения токена")
+
+    def _apply_settings(self) -> None:
+        cfg = self._store.load()
+        cfg.enabled = self._enable_cb.isChecked()
+        cfg.source = self._source_combo.currentData() or "auto"
+        cfg.strong_find = self._strong_find_cb.isChecked()
+        self._service.update_config(cfg)
+        self._on_status("Настройки Яндекс Музыка RPC применены")
+        self._refresh()
+
+    # ------------------------------------------------------------------
+    # Refresh
+    # ------------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        status = self._service.status()
+
+        # Error
+        self._error_label.setText(status.error or "")
+
+        # Discord status
+        if not status.enabled:
+            self._discord_status.setText("Отключён")
+        elif status.discord_connected:
+            self._discord_status.setText("Подключён")
+        else:
+            self._discord_status.setText("Ожидание Discord...")
+
+        # Track
+        track = status.current_track
+        if track:
+            self._track_title.setText(track.title or "—")
+            self._track_artist.setText(track.artist or "—")
+            self._track_album.setText(track.album or "")
+            self._track_url.setText(track.yandex_url or "")
+        else:
+            self._track_title.setText("Ничего не играет")
+            self._track_artist.setText("—")
+            self._track_album.setText("")
+            self._track_url.setText("")
+
+        # Log
+        log = status.log
+        current_count = self._log_list.count()
+        if len(log) != current_count:
+            self._log_list.clear()
+            for entry in log:
+                self._log_list.addItem(entry)
+            self._log_list.scrollToBottom()
 
 
 class DiscordQuestTabPage(QWidget):
@@ -2807,7 +3044,7 @@ class FpsTabPage(QWidget):
         self._frametime_history.push(snapshot.frame_time_ms if snapshot.frame_time_ms is not None else 0.0)
         self.chart.set_series(
             [
-                ("FPS", QColor("#8daa47"), self._fps_history.values()),
+                ("FPS", QColor("#e74c3c"), self._fps_history.values()),
                 ("Frametime", QColor("#6fbad8"), self._frametime_history.values()),
             ],
             y_limit=None,
@@ -3158,11 +3395,11 @@ def build_ui(
 
     sidebar = QFrame()
     sidebar.setObjectName("SidebarFrame")
-    sidebar.setMinimumWidth(74)
-    sidebar.setMaximumWidth(220)
+    sidebar.setMinimumWidth(140)
+    sidebar.setMaximumWidth(260)
     sidebar_layout = QVBoxLayout(sidebar)
-    sidebar_layout.setContentsMargins(8, 10, 8, 10)
-    sidebar_layout.setSpacing(8)
+    sidebar_layout.setContentsMargins(0, 0, 0, 0)
+    sidebar_layout.setSpacing(0)
 
     content = QFrame()
     content.setObjectName("ContentFrame")
@@ -3187,11 +3424,13 @@ def build_ui(
     fps_overlay = FpsOverlayWindow()
     telegram_proxy_service = TelegramProxyService()
     discord_quest_service = DiscordQuestService()
+    yandex_music_rpc_service = YandexMusicRpcService()
     root.destroyed.connect(lambda _=None: analytics_service.stop())
     root.destroyed.connect(lambda _=None: fps_service.close())
     root.destroyed.connect(lambda _=None: fps_overlay.shutdown())
     root.destroyed.connect(lambda _=None: telegram_proxy_service.shutdown())
     root.destroyed.connect(lambda _=None: discord_quest_service.shutdown())
+    root.destroyed.connect(lambda _=None: yandex_music_rpc_service.shutdown())
     lifecycle_pages: dict[int, _LifecyclePage] = {}
     current_index = -1
     nav_titles: dict[QToolButton, str] = {}
@@ -3201,7 +3440,7 @@ def build_ui(
 
     def apply_runtime_settings(current_settings: GeneralSettings) -> None:
         runtime.update_from_settings(current_settings)
-        sidebar.setMaximumWidth(max(220, current_settings.sidebar_width + 32))
+        sidebar.setMaximumWidth(max(260, current_settings.sidebar_width + 32))
         if apply_window_settings is not None:
             apply_window_settings(current_settings)
         refresh_nav_hints()
@@ -3209,6 +3448,19 @@ def build_ui(
     def refresh_nav_hints() -> None:
         for button, title in nav_titles.items():
             button.setToolTip(title if runtime.hints_enabled else "")
+
+    brand_container = QFrame()
+    brand_container.setObjectName("SidebarBrandBlock")
+    brand_vbox = QVBoxLayout(brand_container)
+    brand_vbox.setContentsMargins(14, 14, 8, 10)
+    brand_vbox.setSpacing(1)
+    brand_label = QLabel("LOLILEND")
+    brand_label.setObjectName("SidebarBrand")
+    brand_sub = QLabel("GAMING PORTAL")
+    brand_sub.setObjectName("SidebarBrandSub")
+    brand_vbox.addWidget(brand_label)
+    brand_vbox.addWidget(brand_sub)
+    sidebar_layout.addWidget(brand_container)
 
     for index, tab in enumerate(schema):
         if tab.id in {"analytics", "security"}:
@@ -3223,11 +3475,13 @@ def build_ui(
         button.setCheckable(True)
         button.setAutoExclusive(True)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setToolTip(tab.title)
         button.setIcon(_resolve_icon(button, tab.icon))
-        button.setIconSize(QSize(24, 24))
-        button.setFixedSize(54, 54)
+        button.setIconSize(QSize(18, 18))
+        button.setText(tab.title)
+        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        button.setFixedHeight(40)
         sidebar_layout.addWidget(button)
         group.addButton(button, index)
         nav_titles[button] = tab.title
@@ -3261,6 +3515,12 @@ def build_ui(
             page = DiscordQuestTabPage(
                 lambda message: emit_status(message, False),
                 discord_quest_service,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "yandex_music_rpc":
+            page = YandexMusicRpcTabPage(
+                lambda message: emit_status(message, False),
+                yandex_music_rpc_service,
             )
             lifecycle_pages[index] = page
         elif tab.id == "general":
@@ -3303,7 +3563,8 @@ def build_ui(
     sidebar_layout.addStretch(1)
     profile_slot = QFrame()
     profile_slot.setObjectName("NavProfileSlot")
-    profile_slot.setFixedSize(52, 52)
+    profile_slot.setFixedHeight(52)
+    profile_slot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     profile_layout = QVBoxLayout(profile_slot)
     profile_layout.setContentsMargins(0, 0, 0, 0)
     profile_layout.setSpacing(0)
@@ -3312,7 +3573,7 @@ def build_ui(
     profile_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
     profile_icon.setPixmap(_resolve_icon(profile_icon, "profiles").pixmap(20, 20))
     profile_layout.addWidget(profile_icon)
-    sidebar_layout.addWidget(profile_slot, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+    sidebar_layout.addWidget(profile_slot)
 
     apply_runtime_settings(settings)
     refresh_nav_hints()
@@ -3323,6 +3584,8 @@ def build_ui(
     main_splitter.addWidget(content)
     if settings.main_splitter_state:
         main_splitter.restoreState(decode_qbytearray(settings.main_splitter_state))
+        if main_splitter.sizes() and main_splitter.sizes()[0] < 140:
+            main_splitter.setSizes([175, 1180])
     else:
         main_splitter.setSizes([settings.sidebar_width, 1180])
 
@@ -3330,7 +3593,7 @@ def build_ui(
         current_settings = GeneralSettingsStore().load_settings()
         sizes = main_splitter.sizes()
         if sizes:
-            current_settings.sidebar_width = max(74, min(220, int(sizes[0])))
+            current_settings.sidebar_width = max(140, min(260, int(sizes[0])))
         current_settings.main_splitter_state = encode_qbytearray(main_splitter.saveState())
         GeneralSettingsStore().save_settings(current_settings)
 

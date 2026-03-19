@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
+import math
 import os
 from pathlib import Path
 import queue
@@ -13,7 +14,7 @@ from lolilend.bootstrap import APP_MODE_FLAG, configure_qt_environment, prime_qt
 configure_qt_environment()
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QTimer, Qt
-from PySide6.QtGui import QColor, QFontDatabase, QLinearGradient, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -100,6 +101,101 @@ class NeonBackdrop(QFrame):
         painter.fillRect(0, rect.height() - 92, rect.width(), 92, QColor(0, 0, 0, 95))
 
 
+class PulseSpinner(QWidget):
+    """Three pulsing dots — indicates an active background operation."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(72, 24)
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self.update()
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 0.08) % (2 * math.pi)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy = self.width() // 2, self.height() // 2
+        if not self._timer.isActive():
+            return
+        for i in range(3):
+            s = 0.4 + 0.6 * math.sin(self._phase + i * 2.1)
+            r = int(4 + 3 * s)
+            alpha = int(60 + 195 * s)
+            painter.setBrush(QColor(255, 45, 130, alpha))
+            painter.setPen(Qt.PenStyle.NoPen)
+            ox = (i - 1) * 22
+            painter.drawEllipse(cx + ox - r, cy - r, r * 2, r * 2)
+
+
+class StageBar(QWidget):
+    """Three-step progress indicator: ПРОВЕРКА → СКАЧИВАНИЕ → УСТАНОВКА."""
+
+    _STEPS = ["ПРОВЕРКА", "СКАЧИВАНИЕ", "УСТАНОВКА"]
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._labels: list[QLabel] = []
+        for i, name in enumerate(self._STEPS):
+            lbl = QLabel(f"○ {name}")
+            lbl.setObjectName("LauncherStepLabel")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._labels.append(lbl)
+            layout.addWidget(lbl)
+            if i < len(self._STEPS) - 1:
+                sep = QLabel("───")
+                sep.setObjectName("LauncherStepSep")
+                sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(sep)
+
+        self._set_all_pending()
+
+    def _set_all_pending(self) -> None:
+        for lbl, name in zip(self._labels, self._STEPS):
+            lbl.setText(f"○ {name}")
+            lbl.setStyleSheet("color: #664466; font-weight: 400;")
+
+    def set_step(self, active: int, *, failed: bool = False) -> None:
+        """Set active step (0/1/2). Steps before active are done, rest pending."""
+        for i, (lbl, name) in enumerate(zip(self._labels, self._STEPS)):
+            if i < active:
+                lbl.setText(f"✓ {name}")
+                lbl.setStyleSheet("color: #56ff98; font-weight: 600;")
+            elif i == active:
+                if failed:
+                    lbl.setText(f"✕ {name}")
+                    lbl.setStyleSheet("color: #ff5a5a; font-weight: 700;")
+                else:
+                    lbl.setText(f"● {name}")
+                    lbl.setStyleSheet("color: #ff4f92; font-weight: 700;")
+            else:
+                lbl.setText(f"○ {name}")
+                lbl.setStyleSheet("color: #664466; font-weight: 400;")
+
+    def set_all_done(self) -> None:
+        for lbl, name in zip(self._labels, self._STEPS):
+            lbl.setText(f"✓ {name}")
+            lbl.setStyleSheet("color: #56ff98; font-weight: 600;")
+
+    def reset(self) -> None:
+        self._set_all_pending()
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self, *, auto_start_check: bool = True) -> None:
         super().__init__()
@@ -109,11 +205,24 @@ class LauncherWindow(QMainWindow):
         self._worker_future: Future[None] | None = None
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._intro_animated = False
+        self._border_phase = 0.0
+        self._last_active_step = 0
 
         self._build_ui()
         self._bind_signals()
         self._apply_settings_to_controls()
         self._load_preview_image()
+
+        # Smooth progress animation
+        self._prog_anim = QPropertyAnimation(self.progress_bar, b"value", self)
+        self._prog_anim.setDuration(350)
+        self._prog_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # Pulsing border timer
+        self._border_timer = QTimer(self)
+        self._border_timer.setInterval(30)
+        self._border_timer.timeout.connect(self._pulse_border)
+
         self._set_update_state(UpdateState.UP_TO_DATE, f"Текущая версия: {APP_VERSION}")
         self._append_log("Launcher initialized.")
 
@@ -240,6 +349,9 @@ class LauncherWindow(QMainWindow):
         self.state_chip.setFixedWidth(170)
         hero_layout.addWidget(self.state_chip, 0, Qt.AlignmentFlag.AlignLeft)
 
+        self.stage_bar = StageBar()
+        hero_layout.addWidget(self.stage_bar)
+
         heading = QLabel("Автоматический апдейтер")
         heading.setObjectName("LauncherHeroTitle")
         hero_layout.addWidget(heading)
@@ -257,11 +369,26 @@ class LauncherWindow(QMainWindow):
         self.status_label.setWordWrap(True)
         hero_layout.addWidget(self.status_label)
 
+        self.pulse_spinner = PulseSpinner()
+        self.pulse_spinner.setVisible(False)
+        hero_layout.addWidget(self.pulse_spinner, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("LauncherProgress")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        hero_layout.addWidget(self.progress_bar)
+
+        self.progress_pct_label = QLabel("  0%")
+        self.progress_pct_label.setObjectName("LauncherProgressPct")
+        self.progress_pct_label.setFixedWidth(44)
+        self.progress_pct_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_pct_label.setVisible(False)
+
+        prog_row = QHBoxLayout()
+        prog_row.setSpacing(6)
+        prog_row.addWidget(self.progress_bar, 1)
+        prog_row.addWidget(self.progress_pct_label)
+        hero_layout.addLayout(prog_row)
 
         controls = QHBoxLayout()
         controls.setSpacing(10)
@@ -502,7 +629,8 @@ class LauncherWindow(QMainWindow):
                 if total and total > 0:
                     percent = max(0, min(100, int((downloaded / total) * 100)))
                     self.progress_bar.setRange(0, 100)
-                    self.progress_bar.setValue(percent)
+                    self._set_progress_smooth(percent)
+                    self.progress_pct_label.setText(f"{percent}%")
                 else:
                     self.progress_bar.setRange(0, 0)
             elif event == "latest":
@@ -530,9 +658,61 @@ class LauncherWindow(QMainWindow):
         self.status_tip.setText(f"Состояние: {message}")
         self._append_log(message)
         self.retry_button.setVisible(state_name == UpdateState.FAILED.value)
+
+        _active = {UpdateState.CHECKING.value, UpdateState.DOWNLOADING.value, UpdateState.INSTALLING.value}
+
+        # Spinner + border pulse
+        if state_name in _active:
+            self.pulse_spinner.setVisible(True)
+            self.pulse_spinner.start()
+            if not self._border_timer.isActive():
+                self._border_timer.start()
+        else:
+            self.pulse_spinner.stop()
+            self.pulse_spinner.setVisible(False)
+            self._border_timer.stop()
+            self.hero_card.setStyleSheet("")
+
+        # StageBar
+        if state_name == UpdateState.CHECKING.value:
+            self._last_active_step = 0
+            self.stage_bar.set_step(0)
+        elif state_name == UpdateState.DOWNLOADING.value:
+            self._last_active_step = 1
+            self.stage_bar.set_step(1)
+        elif state_name == UpdateState.INSTALLING.value:
+            self._last_active_step = 2
+            self.stage_bar.set_step(2)
+        elif state_name == UpdateState.UP_TO_DATE.value:
+            self.stage_bar.set_all_done()
+        elif state_name == UpdateState.FAILED.value:
+            self.stage_bar.set_step(self._last_active_step, failed=True)
+
+        # Progress bar visibility
+        if state_name in _active:
+            self.progress_pct_label.setVisible(True)
+        else:
+            self.progress_pct_label.setVisible(False)
+            self.progress_pct_label.setText("  0%")
+
         if state_name in {UpdateState.UP_TO_DATE.value, UpdateState.FAILED.value}:
+            self._prog_anim.stop()
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
+
+    def _set_progress_smooth(self, value: int) -> None:
+        self._prog_anim.stop()
+        self._prog_anim.setStartValue(self.progress_bar.value())
+        self._prog_anim.setEndValue(value)
+        self._prog_anim.start()
+
+    def _pulse_border(self) -> None:
+        self._border_phase = (self._border_phase + 0.05) % (2 * math.pi)
+        alpha = int(100 + 80 * math.sin(self._border_phase))
+        self.hero_card.setStyleSheet(
+            f"QFrame#LauncherHeroCard {{ border: 1px solid rgba(255, 59, 134, {alpha / 255:.2f}); "
+            f"background: rgba(8, 10, 16, 0.78); }}"
+        )
 
     def _append_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -709,5 +889,19 @@ QPlainTextEdit#LauncherLogsView {
 QLabel#LauncherFooter {
     color: #d8a8bf;
     font-size: 12px;
+}
+QLabel#LauncherProgressPct {
+    color: #ff6aa5;
+    font-size: 14px;
+    font-weight: 700;
+}
+QLabel#LauncherStepLabel {
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    padding: 2px 4px;
+}
+QLabel#LauncherStepSep {
+    color: #442233;
+    font-size: 11px;
 }
 """
