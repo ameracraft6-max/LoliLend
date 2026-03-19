@@ -16,7 +16,7 @@ LAUNCH_MODES = {"Стандартный", "Быстрый", "Тихий"}
 ACCENT_PRESETS = {"Rose", "Cyan", "Lime", "Amber"}
 ACTIVE_AI_OPTIONS = {"AI LOLILEND", "Cloudflare Workers AI"}
 AI_PROTOCOL_OPTIONS = {"openai_compatible", "workers_ai_run"}
-DEFAULT_GITHUB_REPO = "LoliLend/LoliLend"
+DEFAULT_GITHUB_REPO = "ameracraft6-max/LoliLend"
 DEFAULT_RELEASE_ASSET_PATTERN = "LoliLend-Setup-*.exe"
 
 

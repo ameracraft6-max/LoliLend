@@ -68,6 +68,7 @@ The launcher checks stable GitHub Releases and downloads installer assets that m
    git push -u origin main
    ```
 3. In launcher settings set `GitHub repo` to your real `owner/repo`.
+   Default in current build: `ameracraft6-max/LoliLend`.
 
 ### Publish steps
 
