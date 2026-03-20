@@ -192,6 +192,16 @@ class StageBar(QWidget):
             lbl.setText(f"✓ {name}")
             lbl.setStyleSheet("color: #56ff98; font-weight: 600;")
 
+    def set_checking_done(self) -> None:
+        """Mark only CHECKING as done; leave DOWNLOADING and INSTALLING pending."""
+        for i, (lbl, name) in enumerate(zip(self._labels, self._STEPS)):
+            if i == 0:
+                lbl.setText(f"✓ {name}")
+                lbl.setStyleSheet("color: #56ff98; font-weight: 600;")
+            else:
+                lbl.setText(f"○ {name}")
+                lbl.setStyleSheet("color: #664466; font-weight: 400;")
+
     def reset(self) -> None:
         self._set_all_pending()
 
@@ -684,7 +694,7 @@ class LauncherWindow(QMainWindow):
             self._last_active_step = 2
             self.stage_bar.set_step(2)
         elif state_name == UpdateState.UP_TO_DATE.value:
-            self.stage_bar.set_all_done()
+            self.stage_bar.set_checking_done()
         elif state_name == UpdateState.FAILED.value:
             self.stage_bar.set_step(self._last_active_step, failed=True)
 

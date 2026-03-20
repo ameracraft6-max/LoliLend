@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from itertools import permutations
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ _DISCORD_APP_ID = "1293868893034090526"
 # Data classes
 # ---------------------------------------------------------------------------
 
-@dataclass(slots=True)
+@dataclass
 class TrackInfo:
     title: str
     artist: str
@@ -30,6 +31,9 @@ class TrackInfo:
     duration_ms: int | None = None
     cover_url: str | None = None
     yandex_url: str | None = None
+    yandex_app_url: str | None = None  # yandexmusic://album/{id}/track/{id}
+    playback_status: str = "Playing"   # "Playing" | "Paused" | "Stopped"
+    position_sec: float = 0.0
 
     def key(self) -> str:
         return f"{self.title}::{self.artist}"
@@ -41,6 +45,9 @@ class YandexMusicRpcConfig:
     source: str = "auto"
     discord_app_id: str = _DISCORD_APP_ID
     strong_find: bool = False
+    activity_type: int = 2          # 0=Playing, 2=Listening to
+    pause_timeout_sec: int = 300    # clear RPC after N seconds paused (5 min)
+    button_mode: str = "web"        # "web" | "app" | "both" | "none"
 
 
 @dataclass(slots=True)
@@ -72,6 +79,9 @@ class YandexMusicRpcStore:
                 cfg.source = str(raw.get("source", cfg.source))
                 cfg.discord_app_id = str(raw.get("discord_app_id", cfg.discord_app_id))
                 cfg.strong_find = bool(raw.get("strong_find", cfg.strong_find))
+                cfg.activity_type = int(raw.get("activity_type", cfg.activity_type))
+                cfg.pause_timeout_sec = int(raw.get("pause_timeout_sec", cfg.pause_timeout_sec))
+                cfg.button_mode = str(raw.get("button_mode", cfg.button_mode))
                 return cfg
         except Exception:
             pass
@@ -85,6 +95,9 @@ class YandexMusicRpcStore:
                 "source": cfg.source,
                 "discord_app_id": cfg.discord_app_id,
                 "strong_find": cfg.strong_find,
+                "activity_type": cfg.activity_type,
+                "pause_timeout_sec": cfg.pause_timeout_sec,
+                "button_mode": cfg.button_mode,
             }
             self._path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
@@ -116,6 +129,7 @@ class YandexMusicRpcService:
         self._error: str | None = None
         self._log: list[str] = []
         self._shutdown = False
+        self._paused_since: float | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -183,11 +197,15 @@ class YandexMusicRpcService:
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
+        last_track_key: str = ""
+        last_status: str = "Playing"
+
         while True:
             with self._lock:
                 if not self._running:
                     break
                 config = self._config
+                paused_since = self._paused_since
 
             try:
                 raw = self._get_media_from_windows()
@@ -196,30 +214,69 @@ class YandexMusicRpcService:
                 time.sleep(_POLL_INTERVAL)
                 continue
 
-            if raw is None:
-                # Nothing playing — clear RPC if we had something
-                with self._lock:
-                    if self._last_track_key:
+            current_status = raw.get("playback_status", "Stopped") if raw else "Stopped"
+
+            # Nothing playing or stopped — clear state
+            if raw is None or current_status == "Stopped":
+                if last_track_key:
+                    last_track_key = ""
+                    last_status = "Playing"
+                    with self._lock:
                         self._last_track_key = ""
                         self._current_track = None
-                self._clear_discord_rpc()
+                        self._paused_since = None
+                    self._clear_discord_rpc()
                 time.sleep(_POLL_INTERVAL)
                 continue
 
-            raw_key = f"{raw.get('title', '')}::{raw.get('artist', '')}"
-            with self._lock:
-                if raw_key == self._last_track_key:
+            # Pause timeout handling
+            now = time.time()
+            if current_status == "Paused":
+                if paused_since is None:
+                    with self._lock:
+                        self._paused_since = now
+                    paused_since = now
+                elif now - paused_since >= config.pause_timeout_sec:
+                    self._log_entry("Пауза слишком долго — скрываем RPC")
+                    self._clear_discord_rpc()
                     time.sleep(_POLL_INTERVAL)
                     continue
+            else:
+                if paused_since is not None:
+                    with self._lock:
+                        self._paused_since = None
+                    paused_since = None
 
-            # New track — enrich via Yandex Music
-            track = self._enrich_track(raw, config)
+            raw_key = f"{raw.get('title', '')}::{raw.get('artist', '')}"
+            track_changed = raw_key != last_track_key
+            status_changed = current_status != last_status
+
+            if not track_changed and not status_changed:
+                time.sleep(_POLL_INTERVAL)
+                continue
+
+            if track_changed:
+                track = self._enrich_track(raw, config)
+                self._log_entry(f"Трек: {track.artist} — {track.title} [{current_status}]")
+            else:
+                # Same track, playback status changed — update in place
+                with self._lock:
+                    track = self._current_track
+                if track is None:
+                    time.sleep(_POLL_INTERVAL)
+                    continue
+                track.playback_status = current_status
+                track.position_sec = float(raw.get("position_sec", 0.0))
+                self._log_entry(f"Статус: {current_status}")
+
+            last_track_key = raw_key
+            last_status = current_status
+
             with self._lock:
                 self._last_track_key = raw_key
                 self._current_track = track
                 self._error = None
 
-            self._log_entry(f"Трек: {track.artist} — {track.title}")
             self._update_discord_rpc(track, config)
             time.sleep(_POLL_INTERVAL)
 
@@ -227,11 +284,10 @@ class YandexMusicRpcService:
     # Windows Media Control
     # ------------------------------------------------------------------
 
-    def _get_media_from_windows(self) -> dict[str, str] | None:
+    def _get_media_from_windows(self) -> dict[str, Any] | None:
         try:
             return asyncio.run(self._get_media_async())
         except RuntimeError:
-            # Event loop already running — create a new one in this thread
             loop = asyncio.new_event_loop()
             try:
                 return loop.run_until_complete(self._get_media_async())
@@ -239,7 +295,7 @@ class YandexMusicRpcService:
                 loop.close()
 
     @staticmethod
-    async def _get_media_async() -> dict[str, str] | None:
+    async def _get_media_async() -> dict[str, Any] | None:
         try:
             import winrt.windows.media.control as wmc  # type: ignore[import]
         except ImportError:
@@ -259,7 +315,30 @@ class YandexMusicRpcService:
             if not title and not artist:
                 return None
 
-            return {"title": title, "artist": artist, "album": album}
+            # Playback status
+            try:
+                playback_info = session.get_playback_info()
+                pb_val = int(playback_info.playback_status)
+                # WinRT MediaPlaybackStatus: 4=Stopped, 5=Playing, 6=Paused
+                playback_status = "Playing" if pb_val == 5 else "Paused" if pb_val == 6 else "Stopped"
+            except Exception:
+                playback_status = "Playing"
+
+            # Playback position
+            position_sec = 0.0
+            try:
+                tl = session.get_timeline_properties()
+                position_sec = tl.position.total_seconds()
+            except Exception:
+                pass
+
+            return {
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "playback_status": playback_status,
+                "position_sec": position_sec,
+            }
         except Exception:
             return None
 
@@ -267,12 +346,20 @@ class YandexMusicRpcService:
     # Yandex Music enrichment
     # ------------------------------------------------------------------
 
-    def _enrich_track(self, raw: dict[str, str], config: YandexMusicRpcConfig) -> TrackInfo:
+    def _enrich_track(self, raw: dict[str, Any], config: YandexMusicRpcConfig) -> TrackInfo:
         title = raw.get("title", "")
         artist = raw.get("artist", "")
         album = raw.get("album") or None
+        playback_status = raw.get("playback_status", "Playing")
+        position_sec = float(raw.get("position_sec", 0.0))
 
-        base = TrackInfo(title=title, artist=artist, album=album)
+        base = TrackInfo(
+            title=title,
+            artist=artist,
+            album=album,
+            playback_status=playback_status,
+            position_sec=position_sec,
+        )
         if not title and not artist:
             return base
 
@@ -286,26 +373,55 @@ class YandexMusicRpcService:
             if not results or not results.tracks or not results.tracks.results:
                 return base
 
-            track = results.tracks.results[0]
-            artists = ", ".join(a.name for a in (track.artists or []))
+            # Find best match via artist permutations (like WinYandexMusicRPC)
+            name_current = f"{artist} - {title}".lower()
+            chosen = None
+            for candidate in results.tracks.results[:5]:
+                all_artists = [a.name for a in (candidate.artists or [])]
+                if not all_artists:
+                    continue
+                if len(all_artists) <= 4:
+                    variants = [
+                        ", ".join(p) + " - " + (candidate.title or "")
+                        for p in permutations(all_artists)
+                    ]
+                else:
+                    variants = [", ".join(all_artists) + " - " + (candidate.title or "")]
+                if any(v.lower() == name_current for v in variants):
+                    chosen = candidate
+                    break
+                if not config.strong_find and chosen is None:
+                    chosen = candidate  # fallback: first result when not strict
+
+            if chosen is None:
+                return base
+
+            track = chosen
+            artists_str = ", ".join(a.name for a in (track.artists or []))
             albums = track.albums or []
             album_title = albums[0].title if albums else album
             cover_uri = track.cover_uri or (albums[0].cover_uri if albums else None)
             cover_url: str | None = None
             if cover_uri:
-                cover_url = "https://" + cover_uri.replace("%%", "200x200")
+                cover_url = "https://" + cover_uri.replace("%%", "400x400")
 
             yandex_url: str | None = None
+            yandex_app_url: str | None = None
             if track.id:
                 yandex_url = f"https://music.yandex.ru/track/{track.id}"
+                if albums and albums[0].id:
+                    yandex_app_url = f"yandexmusic://album/{albums[0].id}/track/{track.id}"
 
             return TrackInfo(
                 title=track.title or title,
-                artist=artists or artist,
+                artist=artists_str or artist,
                 album=album_title,
                 duration_ms=track.duration_ms,
                 cover_url=cover_url,
                 yandex_url=yandex_url,
+                yandex_app_url=yandex_app_url,
+                playback_status=playback_status,
+                position_sec=position_sec,
             )
         except Exception as exc:
             self._log_entry(f"Яндекс Музыка: {exc}")
@@ -359,20 +475,30 @@ class YandexMusicRpcService:
         if not self._ensure_discord_connected(config.discord_app_id):
             return
         try:
-            buttons: list[dict[str, str]] = []
-            if track.yandex_url:
-                buttons.append({"label": "Яндекс Музыка", "url": track.yandex_url})
+            # Timestamps: only show when playing (not paused)
+            start_ts: int | None = None
+            end_ts: int | None = None
+            if track.playback_status == "Playing":
+                start_ts = int(time.time()) - int(track.position_sec)
+                if track.duration_ms:
+                    end_ts = start_ts + track.duration_ms // 1000
+
+            buttons = _build_buttons(track, config.button_mode)
 
             with self._lock:
                 rpc = self._rpc
 
             rpc.update(
+                activity_type=config.activity_type,
                 details=track.title[:128] if track.title else "Неизвестный трек",
-                state=(track.artist[:128] if track.artist else "Неизвестный исполнитель"),
+                state=track.artist[:128] if track.artist else "Неизвестный исполнитель",
                 large_image=track.cover_url or "music",
                 large_text=(track.album or track.artist or "")[:128],
+                small_image="paused" if track.playback_status == "Paused" else None,
+                small_text="На паузе" if track.playback_status == "Paused" else None,
                 buttons=buttons if buttons else None,
-                start=int(time.time()),
+                start=start_ts,
+                end=end_ts,
             )
         except Exception as exc:
             self._log_entry(f"RPC update ошибка: {exc}")
@@ -408,3 +534,16 @@ class YandexMusicRpcService:
             self._log.append(entry)
             if len(self._log) > _LOG_LIMIT:
                 self._log = self._log[-_LOG_LIMIT:]
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper
+# ---------------------------------------------------------------------------
+
+def _build_buttons(track: TrackInfo, mode: str) -> list[dict[str, str]]:
+    buttons: list[dict[str, str]] = []
+    if mode in ("web", "both") and track.yandex_url:
+        buttons.append({"label": "Яндекс Музыка", "url": track.yandex_url})
+    if mode in ("app", "both") and track.yandex_app_url:
+        buttons.append({"label": "Открыть в приложении", "url": track.yandex_app_url})
+    return buttons[:2]

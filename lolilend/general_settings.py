@@ -13,7 +13,8 @@ from lolilend.ai_metadata import TEXT_GENERATION
 
 
 LAUNCH_MODES = {"Стандартный", "Быстрый", "Тихий"}
-ACCENT_PRESETS = {"Rose", "Cyan", "Lime", "Amber"}
+ACCENT_PRESETS = {"Rose", "Cyan", "Lime", "Amber"}  # legacy, kept for compat
+VISUAL_THEMES = {"Dark", "Ocean", "Synthwave", "D.Va"}
 ACTIVE_AI_OPTIONS = {"AI LOLILEND", "Cloudflare Workers AI"}
 AI_PROTOCOL_OPTIONS = {"openai_compatible", "workers_ai_run"}
 DEFAULT_GITHUB_REPO = "ameracraft6-max/LoliLend"
@@ -31,7 +32,8 @@ class GeneralSettings:
     minimize_to_tray: bool = True
     close_to_tray: bool = True
     autostart_windows: bool = False
-    accent_preset: str = "Rose"
+    visual_theme: str = "Dark"
+    accent_preset: str = "Dark"  # legacy alias, mirrors visual_theme
     interface_scale: int = 100
     font_size: int = 13
     panel_opacity: int = 86
@@ -81,7 +83,8 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "minimize_to_tray": True,
         "close_to_tray": True,
         "autostart_windows": False,
-        "accent_preset": "Rose",
+        "visual_theme": "Dark",
+        "accent_preset": "Dark",
         "interface_scale": 100,
         "font_size": 13,
         "panel_opacity": 86,
@@ -119,7 +122,8 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "minimize_to_tray": True,
         "close_to_tray": True,
         "autostart_windows": True,
-        "accent_preset": "Cyan",
+        "visual_theme": "Ocean",
+        "accent_preset": "Ocean",
         "interface_scale": 96,
         "font_size": 12,
         "panel_opacity": 80,
@@ -157,7 +161,8 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "minimize_to_tray": True,
         "close_to_tray": True,
         "autostart_windows": False,
-        "accent_preset": "Amber",
+        "visual_theme": "Synthwave",
+        "accent_preset": "Synthwave",
         "interface_scale": 92,
         "font_size": 12,
         "panel_opacity": 74,
@@ -216,9 +221,10 @@ class GeneralSettingsStore:
         settings.minimize_to_tray = bool(settings_raw.get("minimize_to_tray", settings.minimize_to_tray))
         settings.close_to_tray = bool(settings_raw.get("close_to_tray", settings.close_to_tray))
         settings.autostart_windows = bool(settings_raw.get("autostart_windows", settings.autostart_windows))
-        settings.accent_preset = str(settings_raw.get("accent_preset", settings.accent_preset))
-        if settings.accent_preset not in ACCENT_PRESETS:
-            settings.accent_preset = "Rose"
+        settings.visual_theme = str(settings_raw.get("visual_theme", settings_raw.get("accent_preset", settings.visual_theme)))
+        if settings.visual_theme not in VISUAL_THEMES:
+            settings.visual_theme = "Dark"
+        settings.accent_preset = settings.visual_theme  # keep legacy alias in sync
         settings.interface_scale = self._clamp_int(settings_raw.get("interface_scale", settings.interface_scale), 85, 130)
         settings.font_size = self._clamp_int(settings_raw.get("font_size", settings.font_size), 11, 18)
         settings.panel_opacity = self._clamp_int(settings_raw.get("panel_opacity", settings.panel_opacity), 60, 100)
@@ -391,9 +397,10 @@ class GeneralSettingsStore:
         if launch_mode not in LAUNCH_MODES:
             launch_mode = "Стандартный"
 
-        accent_preset = str(values.get("accent_preset", "Rose"))
-        if accent_preset not in ACCENT_PRESETS:
-            accent_preset = "Rose"
+        visual_theme = str(values.get("visual_theme", values.get("accent_preset", "Dark")))
+        if visual_theme not in VISUAL_THEMES:
+            visual_theme = "Dark"
+        accent_preset = visual_theme  # keep legacy alias in sync
 
         active_ai = str(values.get("active_ai", "AI LOLILEND"))
         if active_ai not in ACTIVE_AI_OPTIONS:
@@ -427,6 +434,7 @@ class GeneralSettingsStore:
             "minimize_to_tray": bool(values.get("minimize_to_tray", True)),
             "close_to_tray": bool(values.get("close_to_tray", True)),
             "autostart_windows": bool(values.get("autostart_windows", False)),
+            "visual_theme": visual_theme,
             "accent_preset": accent_preset,
             "interface_scale": self._clamp_int(values.get("interface_scale", 100), 85, 130),
             "font_size": self._clamp_int(values.get("font_size", 13), 11, 18),

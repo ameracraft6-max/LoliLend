@@ -107,7 +107,8 @@ class UiRuntimeState:
     smooth_animation: bool = True
     hints_enabled: bool = True
     active_ai: str = "AI LOLILEND"
-    accent_preset: str = "Rose"
+    visual_theme: str = "Dark"
+    accent_preset: str = "Dark"  # legacy alias
     interface_scale: int = 100
     font_size: int = 13
     panel_opacity: int = 86
@@ -126,7 +127,8 @@ class UiRuntimeState:
         self.smooth_animation = settings.smooth_animation
         self.hints_enabled = settings.show_hints
         self.active_ai = settings.active_ai
-        self.accent_preset = settings.accent_preset
+        self.visual_theme = settings.visual_theme
+        self.accent_preset = settings.visual_theme  # legacy alias
         self.interface_scale = settings.interface_scale
         self.font_size = settings.font_size
         self.panel_opacity = settings.panel_opacity
@@ -156,6 +158,7 @@ class UiBridge:
     set_fps_capture_enabled: Callable[[bool], bool]
     set_fps_overlay_enabled: Callable[[bool], None]
     set_telegram_proxy_enabled: Callable[[bool], bool]
+    set_theme: Callable[[str], None] = lambda _: None
 
 
 _SECURITY_TITLE = "\u041a\u043e\u043d\u0442\u0440\u043e\u043b\u044c \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u0438"
@@ -222,6 +225,21 @@ class HudBackgroundSurface(QFrame):
         super().__init__()
         self.setObjectName("HudBackgroundSurface")
         self._pixmap = QPixmap(str(_BACKGROUND_PATH)) if _BACKGROUND_PATH.exists() else QPixmap()
+
+    def set_theme_background(self, theme_name: str) -> None:
+        """Reload background image for the given theme."""
+        from lolilend.theme import get_theme
+        from lolilend.runtime import asset_path
+        spec = get_theme(theme_name)
+        if spec.bg_image:
+            path = asset_path(spec.bg_image)
+            if path.exists():
+                self._pixmap = QPixmap(str(path))
+                self.update()
+                return
+        # No image for this theme — use gradient fallback
+        self._pixmap = QPixmap()
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
@@ -653,7 +671,8 @@ class GeneralTabPage(QWidget):
             protected_mode=bool(values["protected_mode"]),
             hide_notifications=bool(values["hide_notifications"]),
             autostart_windows=bool(values["autostart_windows"]),
-            accent_preset=current.accent_preset,
+            visual_theme=current.visual_theme,
+            accent_preset=current.visual_theme,
             interface_scale=current.interface_scale,
             font_size=current.font_size,
             panel_opacity=current.panel_opacity,
@@ -849,11 +868,11 @@ class AdvancedGeneralTabPage(QWidget):
         self.panel_opacity_slider, self.panel_opacity_value_label = self._create_slider_control("Насыщенность панелей", "%", 60, 100, left_layout)
         self.sidebar_width_slider, self.sidebar_width_value_label = self._create_slider_control("Ширина боковой панели", "px", 140, 260, left_layout)
 
-        accent_title = QLabel("Акцентная тема")
+        accent_title = QLabel("Дизайн / Тема")
         accent_title.setProperty("role", "ref_section")
         left_layout.addWidget(accent_title)
         self.accent_combo = QComboBox()
-        self.accent_combo.addItems(["Rose", "Cyan", "Lime", "Amber"])
+        self.accent_combo.addItems(["Dark", "Ocean", "Synthwave", "D.Va"])
         left_layout.addWidget(self.accent_combo)
 
         self.compact_mode_checkbox = QCheckBox("Компактный режим")
@@ -999,7 +1018,7 @@ class AdvancedGeneralTabPage(QWidget):
         self.font_size_slider.setValue(settings.font_size)
         self.panel_opacity_slider.setValue(settings.panel_opacity)
         self.sidebar_width_slider.setValue(settings.sidebar_width)
-        self.accent_combo.setCurrentText(settings.accent_preset)
+        self.accent_combo.setCurrentText(settings.visual_theme)
         self.compact_mode_checkbox.setChecked(settings.compact_mode)
         self.show_status_bar_checkbox.setChecked(settings.show_status_bar)
         self.hints_checkbox.setChecked(settings.show_hints)
@@ -1026,6 +1045,7 @@ class AdvancedGeneralTabPage(QWidget):
             "font_size": int(self.font_size_slider.value()),
             "panel_opacity": int(self.panel_opacity_slider.value()),
             "sidebar_width": int(self.sidebar_width_slider.value()),
+            "visual_theme": str(self.accent_combo.currentText()),
             "accent_preset": str(self.accent_combo.currentText()),
             "compact_mode": bool(self.compact_mode_checkbox.isChecked()),
             "show_status_bar": bool(self.show_status_bar_checkbox.isChecked()),
@@ -1053,7 +1073,8 @@ class AdvancedGeneralTabPage(QWidget):
             minimize_to_tray=bool(values["minimize_to_tray"]),
             close_to_tray=bool(values["close_to_tray"]),
             autostart_windows=bool(values["autostart_windows"]),
-            accent_preset=str(values["accent_preset"]),
+            visual_theme=str(values.get("visual_theme", values["accent_preset"])),
+            accent_preset=str(values.get("visual_theme", values["accent_preset"])),
             interface_scale=int(values["interface_scale"]),
             font_size=int(values["font_size"]),
             panel_opacity=int(values["panel_opacity"]),
@@ -1216,7 +1237,7 @@ class AdvancedGeneralTabPage(QWidget):
         self.font_size_slider.setValue(int(values.get("font_size", self.font_size_slider.value())))
         self.panel_opacity_slider.setValue(int(values.get("panel_opacity", self.panel_opacity_slider.value())))
         self.sidebar_width_slider.setValue(int(values.get("sidebar_width", self.sidebar_width_slider.value())))
-        self.accent_combo.setCurrentText(str(values.get("accent_preset", self.accent_combo.currentText())))
+        self.accent_combo.setCurrentText(str(values.get("visual_theme", values.get("accent_preset", self.accent_combo.currentText()))))
         self.compact_mode_checkbox.setChecked(bool(values.get("compact_mode", self.compact_mode_checkbox.isChecked())))
         self.show_status_bar_checkbox.setChecked(bool(values.get("show_status_bar", self.show_status_bar_checkbox.isChecked())))
         self.hints_checkbox.setChecked(bool(values.get("show_hints", self.hints_checkbox.isChecked())))
@@ -1819,6 +1840,30 @@ class YandexMusicRpcTabPage(QWidget):
         self._source_combo = QComboBox()
         self._source_combo.addItem("Авто (любой источник)", "auto")
         settings_layout.addWidget(self._source_combo)
+
+        settings_layout.addWidget(QLabel("Тип активности в Discord:"))
+        self._activity_type_combo = QComboBox()
+        self._activity_type_combo.addItem("Listening to (слушает)", 2)
+        self._activity_type_combo.addItem("Playing (играет)", 0)
+        settings_layout.addWidget(self._activity_type_combo)
+
+        settings_layout.addWidget(QLabel("Кнопки трека:"))
+        self._button_mode_combo = QComboBox()
+        self._button_mode_combo.addItem("Веб-ссылка", "web")
+        self._button_mode_combo.addItem("В приложении", "app")
+        self._button_mode_combo.addItem("Оба варианта", "both")
+        self._button_mode_combo.addItem("Без кнопок", "none")
+        settings_layout.addWidget(self._button_mode_combo)
+
+        pause_row = QHBoxLayout()
+        pause_row.addWidget(QLabel("Очистить RPC при паузе (сек):"))
+        self._pause_timeout_spin = QSpinBox()
+        self._pause_timeout_spin.setRange(30, 600)
+        self._pause_timeout_spin.setValue(300)
+        self._pause_timeout_spin.setSingleStep(30)
+        pause_row.addWidget(self._pause_timeout_spin)
+        settings_layout.addLayout(pause_row)
+
         self._strong_find_cb = QCheckBox("Строгий поиск (только Яндекс Музыка)")
         self._strong_find_cb.setToolTip(
             "Если включено, поиск выполняется без автокоррекции.\n"
@@ -1854,6 +1899,9 @@ class YandexMusicRpcTabPage(QWidget):
         self._track_album.setProperty("role", "metric_note")
         self._track_album.setWordWrap(True)
         track_layout.addWidget(self._track_album)
+        self._track_playback = QLabel("")
+        self._track_playback.setProperty("role", "metric_note")
+        track_layout.addWidget(self._track_playback)
         self._track_url = QLabel("")
         self._track_url.setProperty("role", "security_url")
         self._track_url.setWordWrap(True)
@@ -1920,6 +1968,16 @@ class YandexMusicRpcTabPage(QWidget):
         self._enable_cb.setChecked(cfg.enabled)
         self._enable_cb.blockSignals(False)
         self._strong_find_cb.setChecked(cfg.strong_find)
+        # Activity type
+        idx = self._activity_type_combo.findData(cfg.activity_type)
+        if idx >= 0:
+            self._activity_type_combo.setCurrentIndex(idx)
+        # Button mode
+        idx = self._button_mode_combo.findData(cfg.button_mode)
+        if idx >= 0:
+            self._button_mode_combo.setCurrentIndex(idx)
+        # Pause timeout
+        self._pause_timeout_spin.setValue(cfg.pause_timeout_sec)
         # Load token (masked)
         token = self._store.load_token()
         if token:
@@ -1948,6 +2006,9 @@ class YandexMusicRpcTabPage(QWidget):
         cfg.enabled = self._enable_cb.isChecked()
         cfg.source = self._source_combo.currentData() or "auto"
         cfg.strong_find = self._strong_find_cb.isChecked()
+        cfg.activity_type = int(self._activity_type_combo.currentData() or 2)
+        cfg.button_mode = str(self._button_mode_combo.currentData() or "web")
+        cfg.pause_timeout_sec = self._pause_timeout_spin.value()
         self._service.update_config(cfg)
         self._on_status("Настройки Яндекс Музыка RPC применены")
         self._refresh()
@@ -1976,11 +2037,14 @@ class YandexMusicRpcTabPage(QWidget):
             self._track_title.setText(track.title or "—")
             self._track_artist.setText(track.artist or "—")
             self._track_album.setText(track.album or "")
+            pb = track.playback_status
+            self._track_playback.setText("▶ Играет" if pb == "Playing" else "⏸ На паузе" if pb == "Paused" else "")
             self._track_url.setText(track.yandex_url or "")
         else:
             self._track_title.setText("Ничего не играет")
             self._track_artist.setText("—")
             self._track_album.setText("")
+            self._track_playback.setText("")
             self._track_url.setText("")
 
         # Log
@@ -3654,6 +3718,9 @@ def build_ui(
                 return False
             return telegram_proxy_page.set_proxy_enabled(enabled)
 
+        def set_theme(theme_name: str) -> None:
+            background.set_theme_background(theme_name)
+
         bridge_sink(
             UiBridge(
                 snapshot=snapshot,
@@ -3664,6 +3731,7 @@ def build_ui(
                 set_fps_capture_enabled=set_fps_capture_enabled,
                 set_fps_overlay_enabled=set_fps_overlay_enabled,
                 set_telegram_proxy_enabled=set_telegram_proxy_enabled,
+                set_theme=set_theme,
             )
         )
 
@@ -3734,6 +3802,8 @@ class LoliLendWindow(QMainWindow):
         self.statusBar().setVisible(settings.show_status_bar)
         self._update_tray_menu_actions()
         self._update_tray_tooltip()
+        if self._ui_bridge is not None:
+            self._ui_bridge.set_theme(settings.visual_theme)
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if event.type() == QEvent.Type.WindowStateChange:

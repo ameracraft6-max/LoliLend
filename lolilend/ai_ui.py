@@ -111,50 +111,92 @@ class _TextGenerationPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
         self.example_title = QLabel("")
         self.example_title.setProperty("role", "ref_section")
+        self.example_title.setContentsMargins(10, 8, 10, 0)
         layout.addWidget(self.example_title)
 
         self.example_body = QLabel("")
         self.example_body.setWordWrap(True)
+        self.example_body.setContentsMargins(10, 2, 10, 0)
         layout.addWidget(self.example_body)
 
         self.apply_example_button = QPushButton("Подставить пример")
-        layout.addWidget(self.apply_example_button, 0, Qt.AlignmentFlag.AlignLeft)
+        apply_row = QHBoxLayout()
+        apply_row.setContentsMargins(10, 4, 10, 0)
+        apply_row.addWidget(self.apply_example_button, 0, Qt.AlignmentFlag.AlignLeft)
+        apply_row.addStretch(1)
+        layout.addLayout(apply_row)
 
-        layout.addWidget(QLabel("Системный промт"))
+        # ── Collapsible system prompt ────────────────────────────
+        self._sysprompt_toggle = QToolButton()
+        self._sysprompt_toggle.setText("▸  Системный промт")
+        self._sysprompt_toggle.setObjectName("AiSysPromptToggle")
+        self._sysprompt_toggle.setCheckable(True)
+        self._sysprompt_toggle.setChecked(False)
+        self._sysprompt_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        layout.addWidget(self._sysprompt_toggle)
+
+        self._sysprompt_body = QWidget()
+        self._sysprompt_body.setObjectName("AiSysPromptBody")
+        sysprompt_layout = QVBoxLayout(self._sysprompt_body)
+        sysprompt_layout.setContentsMargins(8, 4, 8, 4)
+        sysprompt_layout.setSpacing(0)
         self.system_prompt_edit = QPlainTextEdit()
         self.system_prompt_edit.setObjectName("AiSystemPrompt")
         self.system_prompt_edit.setMinimumHeight(110)
-        layout.addWidget(self.system_prompt_edit)
+        sysprompt_layout.addWidget(self.system_prompt_edit)
+        self._sysprompt_body.setVisible(False)
+        layout.addWidget(self._sysprompt_body)
 
+        self._sysprompt_toggle.toggled.connect(self._on_sysprompt_toggled)
+
+        # ── Messages scroll area ─────────────────────────────────
         self.messages_scroll = QScrollArea()
+        self.messages_scroll.setObjectName("AiMessagesScroll")
         self.messages_scroll.setWidgetResizable(True)
         self.messages_container = QWidget()
         self.messages_layout = QVBoxLayout(self.messages_container)
-        self.messages_layout.setContentsMargins(0, 0, 0, 0)
+        self.messages_layout.setContentsMargins(8, 10, 8, 10)
         self.messages_layout.setSpacing(8)
         self.messages_layout.addStretch(1)
         self.messages_scroll.setWidget(self.messages_container)
         layout.addWidget(self.messages_scroll, 1)
 
+        # ── Composer (input + send/stop, unified frame) ──────────
+        composer = QFrame()
+        composer.setObjectName("AiComposer")
+        composer_layout = QVBoxLayout(composer)
+        composer_layout.setContentsMargins(8, 8, 8, 8)
+        composer_layout.setSpacing(6)
+
         self.input_edit = QPlainTextEdit()
         self.input_edit.setObjectName("AiInput")
-        self.input_edit.setMinimumHeight(100)
-        layout.addWidget(self.input_edit)
+        self.input_edit.setMinimumHeight(80)
+        self.input_edit.setMaximumHeight(200)
+        self.input_edit.setPlaceholderText("Введите сообщение...")
+        composer_layout.addWidget(self.input_edit)
 
         send_row = QHBoxLayout()
         send_row.setContentsMargins(0, 0, 0, 0)
         send_row.setSpacing(8)
         self.send_button = QPushButton("Отправить")
+        self.send_button.setObjectName("AiSendButton")
         self.stop_button = QPushButton("Стоп")
+        self.stop_button.setObjectName("AiStopButton")
         self.stop_button.setEnabled(False)
         send_row.addStretch(1)
-        send_row.addWidget(self.send_button)
         send_row.addWidget(self.stop_button)
-        layout.addLayout(send_row)
+        send_row.addWidget(self.send_button)
+        composer_layout.addLayout(send_row)
+
+        layout.addWidget(composer)
+
+    def _on_sysprompt_toggled(self, checked: bool) -> None:
+        self._sysprompt_body.setVisible(checked)
+        self._sysprompt_toggle.setText("▾  Системный промт" if checked else "▸  Системный промт")
 
     def set_example(self, title: str, body: str) -> None:
         self.example_title.setText(title)
@@ -194,11 +236,21 @@ class _TextGenerationPanel(QWidget):
         bubble = QFrame()
         bubble.setObjectName("AiMessageBubbleUser" if role == "user" else "AiMessageBubbleAssistant")
         bubble_layout = QVBoxLayout(bubble)
-        bubble_layout.setContentsMargins(10, 8, 10, 8)
-        bubble_layout.setSpacing(4)
+        bubble_layout.setContentsMargins(12, 10, 12, 10)
+        bubble_layout.setSpacing(5)
+
+        role_row = QHBoxLayout()
+        role_row.setContentsMargins(0, 0, 0, 0)
+        role_row.setSpacing(6)
+        dot = QLabel("●")
+        dot.setObjectName("AiMessageDotUser" if role == "user" else "AiMessageDotAssistant")
         role_label = QLabel("Вы" if role == "user" else "Ассистент")
         role_label.setProperty("role", "ref_section")
-        bubble_layout.addWidget(role_label)
+        role_row.addWidget(dot)
+        role_row.addWidget(role_label)
+        role_row.addStretch(1)
+        bubble_layout.addLayout(role_row)
+
         text_label = QLabel(content)
         text_label.setWordWrap(True)
         text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -253,7 +305,7 @@ class _TextGenerationPanel(QWidget):
 
     def refresh_bubble_widths(self) -> None:
         viewport_width = max(320, self.messages_scroll.viewport().width())
-        bubble_width = max(240, int(viewport_width * 0.72))
+        bubble_width = max(240, int(viewport_width * 0.78))
         for bubble in self._message_bubbles:
             bubble.setMaximumWidth(bubble_width)
 
@@ -547,22 +599,38 @@ class AiTabPage(QWidget):
         left = QFrame()
         left.setObjectName("AiSessionsPanel")
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        left_layout.setSpacing(8)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+
+        # ── Header bar ──────────────────────────────────────────
+        sessions_header = QFrame()
+        sessions_header.setObjectName("AiSessionsHeader")
+        header_layout = QHBoxLayout(sessions_header)
+        header_layout.setContentsMargins(12, 10, 8, 10)
+        header_layout.setSpacing(4)
         sessions_head = QLabel("Сессии")
         sessions_head.setProperty("role", "ref_section")
-        left_layout.addWidget(sessions_head)
+        header_layout.addWidget(sessions_head, 1)
 
-        sessions_actions = QHBoxLayout()
-        sessions_actions.setContentsMargins(0, 0, 0, 0)
-        sessions_actions.setSpacing(6)
-        self.new_chat_button = QPushButton("Новая")
-        self.rename_chat_button = QPushButton("Переименовать")
-        self.delete_chat_button = QPushButton("Удалить")
-        sessions_actions.addWidget(self.new_chat_button)
-        sessions_actions.addWidget(self.rename_chat_button)
-        sessions_actions.addWidget(self.delete_chat_button)
-        left_layout.addLayout(sessions_actions)
+        self.new_chat_button = QToolButton()
+        self.new_chat_button.setText("+")
+        self.new_chat_button.setObjectName("AiSessionActionButton")
+        self.new_chat_button.setToolTip("Новая сессия")
+
+        self.rename_chat_button = QToolButton()
+        self.rename_chat_button.setText("✎")
+        self.rename_chat_button.setObjectName("AiSessionActionButton")
+        self.rename_chat_button.setToolTip("Переименовать")
+
+        self.delete_chat_button = QToolButton()
+        self.delete_chat_button.setText("✕")
+        self.delete_chat_button.setObjectName("AiSessionActionButton")
+        self.delete_chat_button.setToolTip("Удалить")
+
+        header_layout.addWidget(self.new_chat_button)
+        header_layout.addWidget(self.rename_chat_button)
+        header_layout.addWidget(self.delete_chat_button)
+        left_layout.addWidget(sessions_header)
 
         self.sessions_list = QListWidget()
         self.sessions_list.setObjectName("AiSessionsList")
@@ -576,8 +644,27 @@ class AiTabPage(QWidget):
         controls = QFrame()
         controls.setObjectName("AiControlsPanel")
         controls_layout = QVBoxLayout(controls)
-        controls_layout.setContentsMargins(10, 10, 10, 10)
-        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(0)
+
+        # ── Settings toggle header ───────────────────────────────
+        controls_header = QHBoxLayout()
+        controls_header.setContentsMargins(0, 0, 0, 0)
+        self._settings_toggle = QToolButton()
+        self._settings_toggle.setText("▾  Настройки модели")
+        self._settings_toggle.setObjectName("AiSettingsToggle")
+        self._settings_toggle.setCheckable(True)
+        self._settings_toggle.setChecked(True)
+        self._settings_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        controls_header.addWidget(self._settings_toggle, 1)
+        controls_layout.addLayout(controls_header)
+
+        # ── Collapsible settings body ────────────────────────────
+        self._settings_body = QWidget()
+        self._settings_body.setObjectName("AiSettingsBody")
+        body_layout = QVBoxLayout(self._settings_body)
+        body_layout.setContentsMargins(10, 6, 10, 10)
+        body_layout.setSpacing(8)
 
         protocol_row = QHBoxLayout()
         protocol_row.setContentsMargins(0, 0, 0, 0)
@@ -589,7 +676,7 @@ class AiTabPage(QWidget):
         protocol_row.addWidget(self.protocol_combo, 1)
         self.refresh_models_button = QPushButton("Обновить модели")
         protocol_row.addWidget(self.refresh_models_button)
-        controls_layout.addLayout(protocol_row)
+        body_layout.addLayout(protocol_row)
 
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
@@ -599,7 +686,7 @@ class AiTabPage(QWidget):
         filter_row.addWidget(self.model_combo, 1)
         self.popular_only_checkbox = QCheckBox("Только популярные")
         filter_row.addWidget(self.popular_only_checkbox)
-        controls_layout.addLayout(filter_row)
+        body_layout.addLayout(filter_row)
 
         tune_row = QHBoxLayout()
         tune_row.setContentsMargins(0, 0, 0, 0)
@@ -610,16 +697,19 @@ class AiTabPage(QWidget):
         self.max_tokens_spin.setSingleStep(64)
         tune_row.addWidget(self.max_tokens_spin)
         tune_row.addStretch(1)
-        controls_layout.addLayout(tune_row)
+        body_layout.addLayout(tune_row)
 
         self.model_hint_label = QLabel("")
         self.model_hint_label.setWordWrap(True)
         self.model_hint_label.setProperty("role", "ref_section")
-        controls_layout.addWidget(self.model_hint_label)
+        body_layout.addWidget(self.model_hint_label)
+
+        controls_layout.addWidget(self._settings_body)
         self.chat_splitter.addWidget(controls)
 
         self.task_tabs = QTabWidget()
         self.task_tabs.setObjectName("AiTaskTabs")
+        self.task_tabs.setDocumentMode(True)
         self.chat_panel = _TextGenerationPanel()
         self.task_panels: dict[str, _TaskRunPanel] = {}
         self.task_tabs.addTab(self.chat_panel, get_task_definition(TEXT_GENERATION).label)
@@ -680,6 +770,7 @@ class AiTabPage(QWidget):
         self.max_tokens_spin.valueChanged.connect(self._on_options_changed)
         self.popular_only_checkbox.toggled.connect(self._on_popular_toggled)
         self.task_tabs.currentChanged.connect(self._on_task_changed)
+        self._settings_toggle.toggled.connect(self._on_settings_toggled)
         self.root_splitter.splitterMoved.connect(lambda *_: self._save_splitter_state())
         self.chat_splitter.splitterMoved.connect(lambda *_: self._save_splitter_state())
 
@@ -696,6 +787,10 @@ class AiTabPage(QWidget):
             panel.open_asset_button.clicked.connect(lambda _checked=False, key=task_key: self._open_panel_asset(key))
             panel.save_asset_button.clicked.connect(lambda _checked=False, key=task_key: self._save_panel_asset(key))
             panel.play_asset_button.clicked.connect(lambda _checked=False, key=task_key: self._play_panel_asset(key))
+
+    def _on_settings_toggled(self, checked: bool) -> None:
+        self._settings_body.setVisible(checked)
+        self._settings_toggle.setText("▾  Настройки модели" if checked else "▸  Настройки модели")
 
     def _load_state(self) -> None:
         self._is_loading = True

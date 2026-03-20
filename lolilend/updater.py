@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any, Callable
 from urllib.parse import unquote
 
@@ -140,7 +141,35 @@ def download_release_asset(
     progress: Callable[[int, int | None], None] | None = None,
     session: requests.Session | None = None,
     timeout: float = 30.0,
+    max_retries: int = 3,
 ) -> Path:
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            _download_once(release, destination, progress=progress, session=session, timeout=timeout)
+            break
+        except (requests.RequestException, OSError, UpdateError) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                time.sleep(2.0)
+    else:
+        raise UpdateError(f"Download failed after {max_retries} attempts: {last_exc}")
+
+    if not destination.exists() or destination.stat().st_size == 0:
+        destination.unlink(missing_ok=True)
+        raise UpdateError("Downloaded file is empty or missing.")
+
+    return destination
+
+
+def _download_once(
+    release: ReleaseInfo,
+    destination: Path,
+    *,
+    progress: Callable[[int, int | None], None] | None,
+    session: requests.Session | None,
+    timeout: float,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     client = session or requests
     response = client.get(release.asset_url, stream=True, timeout=timeout)
@@ -161,7 +190,6 @@ def download_release_asset(
             downloaded += len(chunk)
             if progress is not None:
                 progress(downloaded, total_bytes)
-    return destination
 
 
 def build_silent_install_command(installer_path: Path) -> list[str]:
