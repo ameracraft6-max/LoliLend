@@ -70,7 +70,41 @@ class GeneralSettings:
     release_asset_pattern: str = DEFAULT_RELEASE_ASSET_PATTERN
     launcher_custom_image_path: str = ""
     profile_name: str = "Стандарт"
+    crosshair_enabled: bool = False
+    crosshair_style: str = "cross_dot"
+    crosshair_color: str = "#00ff00"
+    crosshair_size: int = 20
+    crosshair_thickness: int = 2
+    crosshair_gap: int = 4
+    crosshair_opacity: int = 90
+    crosshair_outline: bool = True
+    crosshair_offset_x: int = 0
+    crosshair_offset_y: int = 0
+    crosshair_hotkey: str = ""
+    crosshair_custom_image_path: str = ""
+    temp_overlay_enabled: bool = False
+    temp_overlay_hotkey: str = ""
+    temp_overlay_position: str = "top_right"
+    temp_overlay_opacity: int = 88
+    temp_alert_celsius: int = 85
+    ping_overlay_enabled: bool = False
+    ping_overlay_hotkey: str = ""
+    ping_overlay_position: str = "bottom_left"
+    ping_overlay_opacity: int = 88
+    ping_hosts_json: str = ""
+    ping_alert_ms: int = 80
+    netspeed_overlay_enabled: bool = False
+    netspeed_overlay_hotkey: str = ""
+    netspeed_overlay_position: str = "bottom_right"
+    netspeed_overlay_opacity: int = 88
+    clipboard_history_size: int = 50
 
+
+VALID_CROSSHAIR_STYLES: frozenset[str] = frozenset({
+    "cross", "dot", "circle", "cross_dot", "cross_circle",
+    "dot_circle", "cross_dot_circle", "t_cross", "x_cross",
+    "diamond", "chevron", "plus_small", "lines_only", "custom_image",
+})
 
 BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     "Стандарт": {
@@ -280,6 +314,42 @@ class GeneralSettingsStore:
         settings.release_asset_pattern = str(settings_raw.get("release_asset_pattern", settings.release_asset_pattern)).strip() or DEFAULT_RELEASE_ASSET_PATTERN
         settings.launcher_custom_image_path = str(settings_raw.get("launcher_custom_image_path", settings.launcher_custom_image_path))
         settings.profile_name = str(settings_raw.get("profile_name", settings.profile_name))
+        settings.crosshair_enabled = bool(settings_raw.get("crosshair_enabled", settings.crosshair_enabled))
+        settings.crosshair_style = str(settings_raw.get("crosshair_style", settings.crosshair_style))
+        if settings.crosshair_style not in VALID_CROSSHAIR_STYLES:
+            settings.crosshair_style = "cross_dot"
+        settings.crosshair_color = str(settings_raw.get("crosshair_color", settings.crosshair_color)).strip() or "#00ff00"
+        settings.crosshair_size = self._clamp_int(settings_raw.get("crosshair_size", settings.crosshair_size), 4, 80)
+        settings.crosshair_thickness = self._clamp_int(settings_raw.get("crosshair_thickness", settings.crosshair_thickness), 1, 10)
+        settings.crosshair_gap = self._clamp_int(settings_raw.get("crosshair_gap", settings.crosshair_gap), 0, 20)
+        settings.crosshair_opacity = self._clamp_int(settings_raw.get("crosshair_opacity", settings.crosshair_opacity), 20, 100)
+        settings.crosshair_outline = bool(settings_raw.get("crosshair_outline", settings.crosshair_outline))
+        settings.crosshair_offset_x = self._clamp_int(settings_raw.get("crosshair_offset_x", settings.crosshair_offset_x), -300, 300)
+        settings.crosshair_offset_y = self._clamp_int(settings_raw.get("crosshair_offset_y", settings.crosshair_offset_y), -300, 300)
+        settings.crosshair_hotkey = str(settings_raw.get("crosshair_hotkey", settings.crosshair_hotkey)).strip()
+        settings.crosshair_custom_image_path = str(settings_raw.get("crosshair_custom_image_path", settings.crosshair_custom_image_path))
+        settings.temp_overlay_enabled = bool(settings_raw.get("temp_overlay_enabled", settings.temp_overlay_enabled))
+        settings.temp_overlay_hotkey = str(settings_raw.get("temp_overlay_hotkey", settings.temp_overlay_hotkey)).strip()
+        settings.temp_overlay_position = str(settings_raw.get("temp_overlay_position", settings.temp_overlay_position))
+        if settings.temp_overlay_position not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+            settings.temp_overlay_position = "top_right"
+        settings.temp_overlay_opacity = self._clamp_int(settings_raw.get("temp_overlay_opacity", settings.temp_overlay_opacity), 35, 100)
+        settings.temp_alert_celsius = self._clamp_int(settings_raw.get("temp_alert_celsius", settings.temp_alert_celsius), 50, 110)
+        settings.ping_overlay_enabled = bool(settings_raw.get("ping_overlay_enabled", settings.ping_overlay_enabled))
+        settings.ping_overlay_hotkey = str(settings_raw.get("ping_overlay_hotkey", settings.ping_overlay_hotkey)).strip()
+        settings.ping_overlay_position = str(settings_raw.get("ping_overlay_position", settings.ping_overlay_position))
+        if settings.ping_overlay_position not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+            settings.ping_overlay_position = "bottom_left"
+        settings.ping_overlay_opacity = self._clamp_int(settings_raw.get("ping_overlay_opacity", settings.ping_overlay_opacity), 35, 100)
+        settings.ping_hosts_json = str(settings_raw.get("ping_hosts_json", settings.ping_hosts_json))
+        settings.ping_alert_ms = self._clamp_int(settings_raw.get("ping_alert_ms", settings.ping_alert_ms), 10, 2000)
+        settings.netspeed_overlay_enabled = bool(settings_raw.get("netspeed_overlay_enabled", settings.netspeed_overlay_enabled))
+        settings.netspeed_overlay_hotkey = str(settings_raw.get("netspeed_overlay_hotkey", settings.netspeed_overlay_hotkey)).strip()
+        settings.netspeed_overlay_position = str(settings_raw.get("netspeed_overlay_position", settings.netspeed_overlay_position))
+        if settings.netspeed_overlay_position not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+            settings.netspeed_overlay_position = "bottom_right"
+        settings.netspeed_overlay_opacity = self._clamp_int(settings_raw.get("netspeed_overlay_opacity", settings.netspeed_overlay_opacity), 35, 100)
+        settings.clipboard_history_size = self._clamp_int(settings_raw.get("clipboard_history_size", settings.clipboard_history_size), 10, 200)
         return settings
 
     def save_settings(self, settings: GeneralSettings) -> None:
@@ -316,6 +386,29 @@ class GeneralSettingsStore:
         }
         output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
+
+    def load_crosshair_presets(self) -> list[dict[str, Any]]:
+        path = self.base_dir / "crosshair_presets.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    def save_crosshair_preset(self, name: str, entry: dict[str, Any]) -> None:
+        presets = self.load_crosshair_presets()
+        presets = [p for p in presets if p.get("name") != name]
+        presets.append(entry)
+        if len(presets) > 20:
+            presets = presets[-20:]
+        (self.base_dir / "crosshair_presets.json").write_text(
+            json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def delete_crosshair_preset(self, name: str) -> None:
+        presets = [p for p in self.load_crosshair_presets() if p.get("name") != name]
+        (self.base_dir / "crosshair_presets.json").write_text(
+            json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def clear_temp_data(self) -> int:
         deleted = 0
@@ -465,6 +558,42 @@ class GeneralSettingsStore:
             "release_asset_pattern": str(values.get("release_asset_pattern", DEFAULT_RELEASE_ASSET_PATTERN)).strip()
             or DEFAULT_RELEASE_ASSET_PATTERN,
             "launcher_custom_image_path": str(values.get("launcher_custom_image_path", "")),
+            "crosshair_enabled": bool(values.get("crosshair_enabled", False)),
+            "crosshair_style": str(values.get("crosshair_style", "cross_dot"))
+            if str(values.get("crosshair_style", "cross_dot")) in VALID_CROSSHAIR_STYLES
+            else "cross_dot",
+            "crosshair_color": str(values.get("crosshair_color", "#00ff00")).strip() or "#00ff00",
+            "crosshair_size": self._clamp_int(values.get("crosshair_size", 20), 4, 80),
+            "crosshair_thickness": self._clamp_int(values.get("crosshair_thickness", 2), 1, 10),
+            "crosshair_gap": self._clamp_int(values.get("crosshair_gap", 4), 0, 20),
+            "crosshair_opacity": self._clamp_int(values.get("crosshair_opacity", 90), 20, 100),
+            "crosshair_outline": bool(values.get("crosshair_outline", True)),
+            "crosshair_offset_x": self._clamp_int(values.get("crosshair_offset_x", 0), -300, 300),
+            "crosshair_offset_y": self._clamp_int(values.get("crosshair_offset_y", 0), -300, 300),
+            "crosshair_hotkey": str(values.get("crosshair_hotkey", "")).strip(),
+            "crosshair_custom_image_path": str(values.get("crosshair_custom_image_path", "")),
+            "temp_overlay_enabled": bool(values.get("temp_overlay_enabled", False)),
+            "temp_overlay_hotkey": str(values.get("temp_overlay_hotkey", "")).strip(),
+            "temp_overlay_position": str(values.get("temp_overlay_position", "top_right"))
+            if str(values.get("temp_overlay_position", "top_right")) in {"top_left", "top_right", "bottom_left", "bottom_right"}
+            else "top_right",
+            "temp_overlay_opacity": self._clamp_int(values.get("temp_overlay_opacity", 88), 35, 100),
+            "temp_alert_celsius": self._clamp_int(values.get("temp_alert_celsius", 85), 50, 110),
+            "ping_overlay_enabled": bool(values.get("ping_overlay_enabled", False)),
+            "ping_overlay_hotkey": str(values.get("ping_overlay_hotkey", "")).strip(),
+            "ping_overlay_position": str(values.get("ping_overlay_position", "bottom_left"))
+            if str(values.get("ping_overlay_position", "bottom_left")) in {"top_left", "top_right", "bottom_left", "bottom_right"}
+            else "bottom_left",
+            "ping_overlay_opacity": self._clamp_int(values.get("ping_overlay_opacity", 88), 35, 100),
+            "ping_hosts_json": str(values.get("ping_hosts_json", "")),
+            "ping_alert_ms": self._clamp_int(values.get("ping_alert_ms", 80), 10, 2000),
+            "netspeed_overlay_enabled": bool(values.get("netspeed_overlay_enabled", False)),
+            "netspeed_overlay_hotkey": str(values.get("netspeed_overlay_hotkey", "")).strip(),
+            "netspeed_overlay_position": str(values.get("netspeed_overlay_position", "bottom_right"))
+            if str(values.get("netspeed_overlay_position", "bottom_right")) in {"top_left", "top_right", "bottom_left", "bottom_right"}
+            else "bottom_right",
+            "netspeed_overlay_opacity": self._clamp_int(values.get("netspeed_overlay_opacity", 88), 35, 100),
+            "clipboard_history_size": self._clamp_int(values.get("clipboard_history_size", 50), 10, 200),
         }
 
     @staticmethod

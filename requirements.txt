@@ -11,3 +11,5 @@ winrt-Windows.Foundation.Collections
 winrt-Windows.Media
 winrt-Windows.Media.Control
 winrt-Windows.Storage.Streams
+wmi>=1.5.1
+GPUtil>=1.4.0

@@ -9,14 +9,16 @@ from pathlib import Path
 import time
 from typing import Protocol
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QPropertyAnimation, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPen, QPolygonF, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -47,11 +49,21 @@ from PySide6.QtWidgets import (
 )
 
 from lolilend.ai_ui import AiTabPage
+from lolilend.crosshair_overlay import CrosshairConfig, CrosshairOverlayWindow, CROSSHAIR_STYLE_OPTIONS, render_crosshair
 from lolilend.analytics import AnalyticsSummary, GameAnalyticsService, LiveGameEntry, TopGameEntry, format_duration
 from lolilend.discord_quests import DiscordQuestService
 from lolilend.yandex_music_rpc import YandexMusicRpcConfig, YandexMusicRpcService, YandexMusicRpcStore
 from lolilend.fps_monitor import FpsMonitorService, FpsSnapshot, STATUS_WINDOWS_ONLY
 from lolilend.fps_overlay import FpsOverlayWindow
+from lolilend.temperature_monitor import TempMonitorService
+from lolilend.temperature_overlay import TempOverlayWindow
+from lolilend.ping_monitor import PingMonitorService, PingSnapshot
+from lolilend.ping_overlay import PingOverlayWindow
+from lolilend.autostart_manager import AutostartEntry, AutostartManager
+from lolilend.netspeed_monitor import NetSpeedService, NetSpeedSnapshot
+from lolilend.netspeed_overlay import NetSpeedOverlayWindow
+from lolilend.task_scheduler import TaskSchedulerService, ScheduledTask
+from lolilend.hosts_manager import HostsManagerService, HostEntry
 from lolilend.general_settings import GeneralSettings, GeneralSettingsStore
 from lolilend.monitoring import (
     HistoryBuffer,
@@ -3387,6 +3399,1754 @@ class AnalyticsTabPage(QWidget):
         self._store.save_settings(settings)
 
 
+_CROSSHAIR_HOTKEY_OPTIONS: list[str] = [
+    "", "F1", "F2", "F3", "F4", "F5", "F6",
+    "F7", "F8", "F9", "F10", "F11", "F12",
+    "Ctrl+Shift+C", "Ctrl+Shift+X", "Ctrl+Alt+C",
+]
+
+
+def _is_light_color(hex_color: str) -> bool:
+    try:
+        c = QColor(hex_color)
+        return (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000 > 128
+    except Exception:
+        return False
+
+
+class CrosshairStyleThumbnail(QFrame):
+    selected = Signal(str)
+
+    def __init__(self, label: str, style_key: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._style_key = style_key
+        self._color = "#00ff00"
+        self._is_selected = False
+        self.setObjectName("CrosshairThumbnail")
+        self.setFixedSize(80, 68)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 44, 0, 2)
+        layout.setSpacing(0)
+        lbl = QLabel(label)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        lbl.setProperty("role", "ref_section")
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+    def set_color(self, color: str) -> None:
+        self._color = color
+        self.update()
+
+    def set_selected(self, selected: bool) -> None:
+        self._is_selected = selected
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        bg = QColor("#232c1e") if self._is_selected else QColor("#1a1f2a")
+        border = QColor("#4a9c2e") if self._is_selected else QColor("#2a3040")
+        painter.fillRect(0, 0, self.width(), 44, bg)
+        painter.setPen(QPen(border, 1))
+        painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        cfg = CrosshairConfig(
+            style=self._style_key, color=self._color,
+            size=8, thickness=1, gap=2, opacity=100, outline=False,
+        )
+        render_crosshair(painter, self.width() // 2, 22, cfg)
+        painter.end()
+
+    def mousePressEvent(self, _event) -> None:  # noqa: N802
+        self.selected.emit(self._style_key)
+
+
+class CrosshairStyleGallery(QScrollArea):
+    style_selected = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        self._grid = QGridLayout(inner)
+        self._grid.setContentsMargins(4, 4, 4, 4)
+        self._grid.setSpacing(6)
+        self.setWidget(inner)
+        self._thumbnails: dict[str, CrosshairStyleThumbnail] = {}
+        self._selected_key = "cross_dot"
+        cols = 3
+        for i, (label, key) in enumerate(CROSSHAIR_STYLE_OPTIONS):
+            thumb = CrosshairStyleThumbnail(label, key)
+            thumb.selected.connect(self._on_thumb_selected)
+            self._grid.addWidget(thumb, i // cols, i % cols)
+            self._thumbnails[key] = thumb
+        if self._selected_key in self._thumbnails:
+            self._thumbnails[self._selected_key].set_selected(True)
+
+    def set_selected_style(self, key: str) -> None:
+        if self._selected_key in self._thumbnails:
+            self._thumbnails[self._selected_key].set_selected(False)
+        self._selected_key = key
+        if key in self._thumbnails:
+            self._thumbnails[key].set_selected(True)
+
+    def set_color(self, color: str) -> None:
+        for thumb in self._thumbnails.values():
+            thumb.set_color(color)
+
+    def _on_thumb_selected(self, key: str) -> None:
+        self.set_selected_style(key)
+        self.style_selected.emit(key)
+
+
+class CrosshairPreviewWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cfg = CrosshairConfig()
+        self.setMinimumSize(280, 220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def apply_config(self, cfg: CrosshairConfig) -> None:
+        self._cfg = cfg
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor("#0a0e14"))
+        cx = self.width() // 2
+        cy = self.height() // 2
+        painter.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        painter.drawLine(cx, 0, cx, self.height())
+        painter.drawLine(0, cy, self.width(), cy)
+        render_crosshair(painter, cx, cy, self._cfg)
+        painter.end()
+
+
+class CrosshairTabPage(QWidget):
+    def __init__(
+        self,
+        on_status: Callable[[str], None],
+        overlay: CrosshairOverlayWindow,
+    ) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._overlay = overlay
+        self._store = GeneralSettingsStore()
+        self._color = "#00ff00"
+        self._selected_style = "cross_dot"
+        self._custom_image_path = ""
+        self._is_loading = False
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(10)
+
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(10)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_inner = QWidget()
+        right_column = QVBoxLayout(right_inner)
+        right_column.setContentsMargins(0, 0, 4, 0)
+        right_column.setSpacing(10)
+        right_scroll.setWidget(right_inner)
+
+        # --- Gallery ---
+        gallery_box = RefPanelBox("Галерея стилей")
+        gallery_layout = QVBoxLayout(gallery_box)
+        gallery_layout.setContentsMargins(8, 16, 8, 8)
+        gallery_layout.setSpacing(0)
+        self._gallery = CrosshairStyleGallery()
+        self._gallery.setMinimumHeight(200)
+        gallery_layout.addWidget(self._gallery)
+        left_column.addWidget(gallery_box, 2)
+
+        # --- Preview ---
+        preview_box = RefPanelBox("Предпросмотр")
+        preview_layout = QVBoxLayout(preview_box)
+        preview_layout.setContentsMargins(12, 16, 12, 10)
+        preview_layout.setSpacing(6)
+        self._preview = CrosshairPreviewWidget()
+        preview_layout.addWidget(self._preview)
+        left_column.addWidget(preview_box, 3)
+
+        # --- Params ---
+        params_box = RefPanelBox("Параметры")
+        params_layout = QVBoxLayout(params_box)
+        params_layout.setContentsMargins(12, 16, 12, 10)
+        params_layout.setSpacing(8)
+        params_layout.addWidget(RefSectionHeader("Цвет прицела"))
+        self._color_btn = QPushButton("#00ff00")
+        self._color_btn.setObjectName("CrosshairColorButton")
+        self._color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        params_layout.addWidget(self._color_btn)
+        size_row = RefSliderRow("Размер", 4, 80, 20, " px")
+        self._size_slider = size_row.slider
+        params_layout.addWidget(size_row)
+        thick_row = RefSliderRow("Толщина", 1, 10, 2, " px")
+        self._thick_slider = thick_row.slider
+        params_layout.addWidget(thick_row)
+        gap_row = RefSliderRow("Зазор от центра", 0, 20, 4, " px")
+        self._gap_slider = gap_row.slider
+        params_layout.addWidget(gap_row)
+        opacity_row = RefSliderRow("Прозрачность", 20, 100, 90, "%")
+        self._opacity_slider = opacity_row.slider
+        params_layout.addWidget(opacity_row)
+        outline_row = RefToggleRow("Обводка (тёмный контур)", True)
+        self._outline_check = outline_row.checkbox
+        params_layout.addWidget(outline_row)
+        params_layout.addWidget(RefSectionHeader("Свой рисунок"))
+        self._import_img_btn = QPushButton("Импорт изображения")
+        self._import_img_btn.setObjectName("CrosshairImportButton")
+        params_layout.addWidget(self._import_img_btn)
+        self._img_path_label = QLabel("Файл не выбран")
+        self._img_path_label.setProperty("role", "ref_section")
+        self._img_path_label.setWordWrap(True)
+        params_layout.addWidget(self._img_path_label)
+        right_column.addWidget(params_box)
+
+        # --- Position ---
+        pos_box = RefPanelBox("Позиция")
+        pos_layout = QVBoxLayout(pos_box)
+        pos_layout.setContentsMargins(12, 16, 12, 10)
+        pos_layout.setSpacing(8)
+        ox_row = RefSliderRow("Смещение X", -300, 300, 0, " px")
+        self._offset_x_slider = ox_row.slider
+        pos_layout.addWidget(ox_row)
+        oy_row = RefSliderRow("Смещение Y", -300, 300, 0, " px")
+        self._offset_y_slider = oy_row.slider
+        pos_layout.addWidget(oy_row)
+        right_column.addWidget(pos_box)
+
+        # --- Hotkey ---
+        hotkey_box = RefPanelBox("Горячая клавиша")
+        hotkey_layout = QVBoxLayout(hotkey_box)
+        hotkey_layout.setContentsMargins(12, 16, 12, 10)
+        hotkey_layout.setSpacing(8)
+        hotkey_row = RefSelectRow("Показать / скрыть прицел", _CROSSHAIR_HOTKEY_OPTIONS, "")
+        self._hotkey_combo = hotkey_row.combo
+        hotkey_layout.addWidget(hotkey_row)
+        self._hotkey_status_label = QLabel("Hotkey: нет")
+        self._hotkey_status_label.setProperty("role", "ref_section")
+        hotkey_layout.addWidget(self._hotkey_status_label)
+        right_column.addWidget(hotkey_box)
+
+        # --- Presets ---
+        preset_box = RefPanelBox("Пресеты")
+        preset_layout = QVBoxLayout(preset_box)
+        preset_layout.setContentsMargins(12, 16, 12, 10)
+        preset_layout.setSpacing(8)
+        preset_layout.addWidget(RefSectionHeader("Название пресета"))
+        self._preset_name_edit = QLineEdit()
+        self._preset_name_edit.setPlaceholderText("Название пресета")
+        preset_layout.addWidget(self._preset_name_edit)
+        preset_btns = QHBoxLayout()
+        preset_btns.setContentsMargins(0, 0, 0, 0)
+        preset_btns.setSpacing(6)
+        self._preset_save_btn = QPushButton("Сохранить")
+        self._preset_load_btn = QPushButton("Загрузить")
+        self._preset_del_btn = QPushButton("Удалить")
+        preset_btns.addWidget(self._preset_save_btn)
+        preset_btns.addWidget(self._preset_load_btn)
+        preset_btns.addWidget(self._preset_del_btn)
+        preset_layout.addLayout(preset_btns)
+        self._preset_list = QListWidget()
+        self._preset_list.setMaximumHeight(120)
+        preset_layout.addWidget(self._preset_list)
+        right_column.addWidget(preset_box)
+
+        # --- Control ---
+        control_box = RefPanelBox("Управление")
+        control_layout = QVBoxLayout(control_box)
+        control_layout.setContentsMargins(12, 16, 12, 10)
+        control_layout.setSpacing(8)
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(8)
+        self._enable_btn = QPushButton("Включить прицел")
+        self._enable_btn.setObjectName("CrosshairEnableButton")
+        self._disable_btn = QPushButton("Выключить прицел")
+        self._disable_btn.setObjectName("CrosshairDisableButton")
+        actions_row.addWidget(self._enable_btn)
+        actions_row.addWidget(self._disable_btn)
+        control_layout.addLayout(actions_row)
+        self._status_label = QLabel("Статус: ВЫКЛ")
+        self._status_label.setProperty("role", "ref_section")
+        control_layout.addWidget(self._status_label)
+        right_column.addWidget(control_box)
+        right_column.addStretch(1)
+
+        root.addLayout(left_column, 3)
+        root.addWidget(right_scroll, 2)
+
+        # --- Signals ---
+        self._gallery.style_selected.connect(self._on_style_selected)
+        self._color_btn.clicked.connect(self._pick_color)
+        self._outline_check.stateChanged.connect(self._on_settings_changed)
+        self._size_slider.valueChanged.connect(self._on_settings_changed)
+        self._thick_slider.valueChanged.connect(self._on_settings_changed)
+        self._gap_slider.valueChanged.connect(self._on_settings_changed)
+        self._opacity_slider.valueChanged.connect(self._on_settings_changed)
+        self._offset_x_slider.valueChanged.connect(self._on_settings_changed)
+        self._offset_y_slider.valueChanged.connect(self._on_settings_changed)
+        self._import_img_btn.clicked.connect(self._import_image)
+        self._hotkey_combo.currentTextChanged.connect(self._on_hotkey_changed)
+        self._preset_save_btn.clicked.connect(self._save_preset)
+        self._preset_load_btn.clicked.connect(self._load_preset)
+        self._preset_del_btn.clicked.connect(self._delete_preset)
+        self._preset_list.itemDoubleClicked.connect(lambda _item: self._load_preset())
+        self._enable_btn.clicked.connect(self._enable_overlay)
+        self._disable_btn.clicked.connect(self._disable_overlay)
+
+        self._load_initial_state()
+
+    def on_shown(self) -> None:
+        pass
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _current_config(self) -> CrosshairConfig:
+        return CrosshairConfig(
+            style=self._selected_style,
+            color=self._color,
+            size=self._size_slider.value(),
+            thickness=self._thick_slider.value(),
+            gap=self._gap_slider.value(),
+            opacity=self._opacity_slider.value(),
+            outline=self._outline_check.isChecked(),
+            offset_x=self._offset_x_slider.value(),
+            offset_y=self._offset_y_slider.value(),
+            custom_image_path=self._custom_image_path,
+        )
+
+    def _update_color_button(self) -> None:
+        text_color = "#000000" if _is_light_color(self._color) else "#ffffff"
+        self._color_btn.setStyleSheet(
+            f"background-color: {self._color}; color: {text_color}; border-radius: 4px; padding: 4px 8px;"
+        )
+        self._color_btn.setText(self._color)
+
+    def _on_style_selected(self, key: str) -> None:
+        self._selected_style = key
+        self._on_settings_changed()
+
+    def _on_settings_changed(self) -> None:
+        if self._is_loading:
+            return
+        cfg = self._current_config()
+        self._preview.apply_config(cfg)
+        self._overlay.apply_config(cfg)
+        self._persist_settings(
+            crosshair_style=cfg.style,
+            crosshair_color=cfg.color,
+            crosshair_size=cfg.size,
+            crosshair_thickness=cfg.thickness,
+            crosshair_gap=cfg.gap,
+            crosshair_opacity=cfg.opacity,
+            crosshair_outline=cfg.outline,
+            crosshair_offset_x=cfg.offset_x,
+            crosshair_offset_y=cfg.offset_y,
+            crosshair_custom_image_path=cfg.custom_image_path,
+        )
+
+    def _pick_color(self) -> None:
+        chosen = QColorDialog.getColor(QColor(self._color), self, "Цвет прицела")
+        if chosen.isValid():
+            self._color = chosen.name()
+            self._update_color_button()
+            self._gallery.set_color(self._color)
+            self._on_settings_changed()
+
+    def _import_image(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите изображение прицела", "",
+            "Изображения (*.png *.bmp *.jpg *.jpeg)"
+        )
+        if path:
+            self._custom_image_path = path
+            self._img_path_label.setText(Path(path).name)
+            self._selected_style = "custom_image"
+            self._gallery.set_selected_style("custom_image")
+            self._on_settings_changed()
+
+    def _on_hotkey_changed(self, value: str) -> None:
+        if self._is_loading:
+            return
+        ok, error = self._overlay.set_hotkey(value)
+        if ok:
+            self._hotkey_status_label.setText(f"Hotkey: {value or 'нет'}")
+            self._persist_settings(crosshair_hotkey=value)
+        else:
+            self._hotkey_status_label.setText(f"Ошибка: {error}")
+            if error:
+                self._on_status(error)
+
+    def _enable_overlay(self) -> None:
+        cfg = self._current_config()
+        self._overlay.apply_config(cfg)
+        self._overlay.show_overlay()
+        self._status_label.setText("Статус: ВКЛ")
+        self._persist_settings(crosshair_enabled=True)
+        self._on_status("Прицел включён")
+
+    def _disable_overlay(self) -> None:
+        self._overlay.hide()
+        self._status_label.setText("Статус: ВЫКЛ")
+        self._persist_settings(crosshair_enabled=False)
+        self._on_status("Прицел выключен")
+
+    def _save_preset(self) -> None:
+        name = self._preset_name_edit.text().strip()
+        if not name:
+            self._on_status("Введите название пресета")
+            return
+        cfg = self._current_config()
+        entry = {
+            "name": name,
+            "style": cfg.style,
+            "color": cfg.color,
+            "size": cfg.size,
+            "thickness": cfg.thickness,
+            "gap": cfg.gap,
+            "opacity": cfg.opacity,
+            "outline": cfg.outline,
+            "offset_x": cfg.offset_x,
+            "offset_y": cfg.offset_y,
+        }
+        self._store.save_crosshair_preset(name, entry)
+        self._refresh_preset_list()
+        self._on_status(f"Пресет '{name}' сохранён")
+
+    def _load_preset(self) -> None:
+        item = self._preset_list.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        presets = self._store.load_crosshair_presets()
+        entry = next((p for p in presets if p.get("name") == name), None)
+        if entry is None:
+            return
+        self._is_loading = True
+        self._color = entry.get("color", "#00ff00")
+        self._selected_style = entry.get("style", "cross_dot")
+        self._size_slider.setValue(int(entry.get("size", 20)))
+        self._thick_slider.setValue(int(entry.get("thickness", 2)))
+        self._gap_slider.setValue(int(entry.get("gap", 4)))
+        self._opacity_slider.setValue(int(entry.get("opacity", 90)))
+        self._outline_check.setChecked(bool(entry.get("outline", True)))
+        self._offset_x_slider.setValue(int(entry.get("offset_x", 0)))
+        self._offset_y_slider.setValue(int(entry.get("offset_y", 0)))
+        self._gallery.set_selected_style(self._selected_style)
+        self._gallery.set_color(self._color)
+        self._update_color_button()
+        self._is_loading = False
+        self._on_settings_changed()
+        self._on_status(f"Пресет '{name}' загружен")
+
+    def _delete_preset(self) -> None:
+        item = self._preset_list.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        self._store.delete_crosshair_preset(name)
+        self._refresh_preset_list()
+        self._on_status(f"Пресет '{name}' удалён")
+
+    def _refresh_preset_list(self) -> None:
+        self._preset_list.clear()
+        for p in self._store.load_crosshair_presets():
+            self._preset_list.addItem(str(p.get("name", "")))
+
+    def _load_initial_state(self) -> None:
+        self._is_loading = True
+        settings = self._store.load_settings()
+        self._color = settings.crosshair_color
+        self._selected_style = settings.crosshair_style
+        self._custom_image_path = settings.crosshair_custom_image_path
+        self._gallery.set_selected_style(self._selected_style)
+        self._gallery.set_color(self._color)
+        self._size_slider.setValue(settings.crosshair_size)
+        self._thick_slider.setValue(settings.crosshair_thickness)
+        self._gap_slider.setValue(settings.crosshair_gap)
+        self._opacity_slider.setValue(settings.crosshair_opacity)
+        self._outline_check.setChecked(settings.crosshair_outline)
+        self._offset_x_slider.setValue(settings.crosshair_offset_x)
+        self._offset_y_slider.setValue(settings.crosshair_offset_y)
+        hotkey = settings.crosshair_hotkey
+        if hotkey in _CROSSHAIR_HOTKEY_OPTIONS:
+            self._hotkey_combo.setCurrentText(hotkey)
+        if self._custom_image_path:
+            self._img_path_label.setText(Path(self._custom_image_path).name)
+        self._update_color_button()
+        cfg = self._current_config()
+        self._overlay.apply_config(cfg)
+        self._preview.apply_config(cfg)
+        if hotkey:
+            ok, err = self._overlay.set_hotkey(hotkey)
+            self._hotkey_status_label.setText(f"Hotkey: {hotkey}" if ok else f"Ошибка: {err}")
+        if settings.crosshair_enabled:
+            self._overlay.show_overlay()
+            self._status_label.setText("Статус: ВКЛ")
+        else:
+            self._status_label.setText("Статус: ВЫКЛ")
+        self._refresh_preset_list()
+        self._is_loading = False
+
+    def _persist_settings(self, **updates: object) -> None:
+        settings = self._store.load_settings()
+        for key, value in updates.items():
+            setattr(settings, key, value)
+        self._store.save_settings(settings)
+
+
+_OVERLAY_HOTKEY_OPTIONS: list[str] = [
+    "", "F1", "F2", "F3", "F4", "F5", "F6",
+    "F7", "F8", "F9", "F10", "F11", "F12",
+    "Ctrl+Shift+T", "Ctrl+Shift+P", "Ctrl+Alt+T", "Ctrl+Alt+P",
+]
+
+_OVERLAY_POSITION_OPTIONS: list[str] = ["top_left", "top_right", "bottom_left", "bottom_right"]
+
+
+class AutostartTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._manager = AutostartManager()
+        self._entries: list[AutostartEntry] = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(8)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
+        self._refresh_btn = QPushButton("Обновить")
+        self._enable_btn = QPushButton("Включить")
+        self._disable_btn = QPushButton("Выключить")
+        self._delete_btn = QPushButton("Удалить")
+        self._delete_btn.setObjectName("AutostartDeleteButton")
+        for btn in (self._refresh_btn, self._enable_btn, self._disable_btn, self._delete_btn):
+            toolbar.addWidget(btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
+
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["Имя", "Команда", "Источник", "Статус"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        root.addWidget(self._table, 1)
+
+        self._info_label = QLabel("Всего: 0 | Включено: 0 | Выключено: 0")
+        self._info_label.setProperty("role", "ref_section")
+        root.addWidget(self._info_label)
+
+        self._refresh_btn.clicked.connect(self._refresh_table)
+        self._enable_btn.clicked.connect(self._enable_selected)
+        self._disable_btn.clicked.connect(self._disable_selected)
+        self._delete_btn.clicked.connect(self._delete_selected)
+
+    def on_shown(self) -> None:
+        self._refresh_table()
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _refresh_table(self) -> None:
+        self._entries = self._manager.load_entries()
+        self._table.setRowCount(0)
+        for i, entry in enumerate(self._entries):
+            self._table.insertRow(i)
+            for col, text in enumerate([entry.name, entry.command, entry.source, "Вкл" if entry.enabled else "Выкл"]):
+                item = QTableWidgetItem(text)
+                if not entry.enabled:
+                    item.setForeground(QColor("#888888"))
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                self._table.setItem(i, col, item)
+        enabled_count = sum(1 for e in self._entries if e.enabled)
+        self._info_label.setText(
+            f"Всего: {len(self._entries)} | Включено: {enabled_count} | Выключено: {len(self._entries) - enabled_count}"
+        )
+
+    def _selected_entry(self) -> AutostartEntry | None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._entries):
+            return None
+        return self._entries[row]
+
+    def _enable_selected(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self._on_status("Выберите запись")
+            return
+        ok, msg = self._manager.enable_entry(entry)
+        self._on_status(msg)
+        self._refresh_table()
+
+    def _disable_selected(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self._on_status("Выберите запись")
+            return
+        ok, msg = self._manager.disable_entry(entry)
+        self._on_status(msg)
+        self._refresh_table()
+
+    def _delete_selected(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self._on_status("Выберите запись")
+            return
+        reply = QMessageBox.question(
+            self, "Удалить запись",
+            f"Удалить '{entry.name}' из автозапуска?\nЭто действие нельзя отменить.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = self._manager.delete_entry(entry)
+        self._on_status(msg)
+        self._refresh_table()
+
+
+class TempTabPage(QWidget):
+    def __init__(
+        self,
+        on_status: Callable[[str], None],
+        service: TempMonitorService,
+        overlay: TempOverlayWindow,
+    ) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = service
+        self._overlay = overlay
+        self._store = GeneralSettingsStore()
+        self._is_loading = False
+
+        self._cpu_history = HistoryBuffer(60)
+        self._gpu_history = HistoryBuffer(60)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(10)
+
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(10)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_inner = QWidget()
+        right_column = QVBoxLayout(right_inner)
+        right_column.setContentsMargins(0, 0, 4, 0)
+        right_column.setSpacing(10)
+        right_scroll.setWidget(right_inner)
+
+        # --- Metrics ---
+        metrics_box = RefPanelBox("Температуры")
+        metrics_layout = QVBoxLayout(metrics_box)
+        metrics_layout.setContentsMargins(12, 16, 12, 10)
+        metrics_layout.setSpacing(8)
+
+        cards = QGridLayout()
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.setHorizontalSpacing(8)
+        cards.setVerticalSpacing(8)
+        self._cpu_card = MetricCard("CPU")
+        self._gpu_card = MetricCard("GPU")
+        cards.addWidget(self._cpu_card, 0, 0)
+        cards.addWidget(self._gpu_card, 0, 1)
+        metrics_layout.addLayout(cards)
+
+        self._chart = LineHistoryChart(max_points=60)
+        metrics_layout.addWidget(self._chart)
+        left_column.addWidget(metrics_box, 1)
+
+        # --- Overlay controls ---
+        overlay_box = RefPanelBox("Overlay")
+        overlay_layout = QVBoxLayout(overlay_box)
+        overlay_layout.setContentsMargins(12, 16, 12, 10)
+        overlay_layout.setSpacing(8)
+
+        overlay_actions = QHBoxLayout()
+        overlay_actions.setContentsMargins(0, 0, 0, 0)
+        overlay_actions.setSpacing(8)
+        self._start_btn = QPushButton("Включить overlay")
+        self._start_btn.setObjectName("TempOverlayStartButton")
+        self._stop_btn = QPushButton("Выключить overlay")
+        self._stop_btn.setObjectName("TempOverlayStopButton")
+        overlay_actions.addWidget(self._start_btn)
+        overlay_actions.addWidget(self._stop_btn)
+        overlay_layout.addLayout(overlay_actions)
+
+        hotkey_row = RefSelectRow("Горячая клавиша", _OVERLAY_HOTKEY_OPTIONS, "")
+        self._hotkey_combo = hotkey_row.combo
+        overlay_layout.addWidget(hotkey_row)
+
+        position_row = RefSelectRow("Позиция", _OVERLAY_POSITION_OPTIONS, "top_right")
+        self._position_combo = position_row.combo
+        overlay_layout.addWidget(position_row)
+
+        opacity_row = RefSliderRow("Прозрачность", 35, 100, 88, "%")
+        self._opacity_slider = opacity_row.slider
+        overlay_layout.addWidget(opacity_row)
+
+        alert_row = RefSliderRow("Порог перегрева", 50, 110, 85, " °C")
+        self._alert_slider = alert_row.slider
+        overlay_layout.addWidget(alert_row)
+
+        right_column.addWidget(overlay_box)
+
+        # --- Diagnostics ---
+        diag_box = RefPanelBox("Диагностика")
+        diag_layout = QVBoxLayout(diag_box)
+        diag_layout.setContentsMargins(12, 16, 12, 10)
+        diag_layout.setSpacing(6)
+        self._backend_label = QLabel("Backend: —")
+        self._status_label = QLabel("Статус: —")
+        for lbl in (self._backend_label, self._status_label):
+            lbl.setProperty("role", "ref_section")
+            lbl.setWordWrap(True)
+            diag_layout.addWidget(lbl)
+        right_column.addWidget(diag_box)
+        right_column.addStretch(1)
+
+        root.addLayout(left_column, 3)
+        root.addWidget(right_scroll, 2)
+
+        self._start_btn.clicked.connect(self._start_overlay)
+        self._stop_btn.clicked.connect(self._stop_overlay)
+        self._hotkey_combo.currentTextChanged.connect(self._on_hotkey_changed)
+        self._position_combo.currentTextChanged.connect(self._on_position_changed)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self._alert_slider.valueChanged.connect(self._on_alert_changed)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._refresh)
+
+        self._load_initial_state()
+
+    def on_shown(self) -> None:
+        self._refresh()
+        self._timer.start()
+
+    def on_hidden(self) -> None:
+        self._timer.stop()
+
+    def _refresh(self) -> None:
+        snap = self._service.get_snapshot()
+        self._overlay.update_snapshot(snap)
+
+        cpu_text = "N/A" if snap.cpu_temp is None else f"{snap.cpu_temp:.0f} °C"
+        gpu_text = "N/A" if snap.gpu_temp is None else f"{snap.gpu_temp:.0f} °C"
+        self._cpu_card.set_value(cpu_text)
+        self._gpu_card.set_value(gpu_text)
+        self._status_label.setText(f"Статус: {snap.status}")
+
+        if snap.cpu_temp is not None:
+            self._cpu_history.push(snap.cpu_temp)
+        if snap.gpu_temp is not None:
+            self._gpu_history.push(snap.gpu_temp)
+
+        self._chart.set_series([
+            ("CPU", QColor("#44dd66"), self._cpu_history.values()),
+            ("GPU", QColor("#ff4444"), self._gpu_history.values()),
+        ])
+
+    def _start_overlay(self) -> None:
+        self._overlay.show_overlay()
+        self._persist_settings(temp_overlay_enabled=True)
+
+    def _stop_overlay(self) -> None:
+        self._overlay.hide()
+        self._persist_settings(temp_overlay_enabled=False)
+
+    def _on_hotkey_changed(self, value: str) -> None:
+        if self._is_loading:
+            return
+        ok, error = self._overlay.set_hotkey(value)
+        if ok:
+            self._persist_settings(temp_overlay_hotkey=value)
+        elif error:
+            self._on_status(error)
+
+    def _on_position_changed(self, value: str) -> None:
+        self._overlay.set_overlay_position(value)
+        if not self._is_loading:
+            self._persist_settings(temp_overlay_position=value)
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self._overlay.set_overlay_opacity(value)
+        if not self._is_loading:
+            self._persist_settings(temp_overlay_opacity=value)
+
+    def _on_alert_changed(self, value: int) -> None:
+        self._overlay.set_alert_threshold(value)
+        if not self._is_loading:
+            self._persist_settings(temp_alert_celsius=value)
+
+    def _load_initial_state(self) -> None:
+        self._is_loading = True
+        settings = self._store.load_settings()
+        self._backend_label.setText(f"Backend: {self._service.backend_info()}")
+        if settings.temp_overlay_hotkey in _OVERLAY_HOTKEY_OPTIONS:
+            self._hotkey_combo.setCurrentText(settings.temp_overlay_hotkey)
+        self._position_combo.setCurrentText(settings.temp_overlay_position)
+        self._opacity_slider.setValue(settings.temp_overlay_opacity)
+        self._alert_slider.setValue(settings.temp_alert_celsius)
+        self._overlay.set_overlay_position(settings.temp_overlay_position)
+        self._overlay.set_overlay_opacity(settings.temp_overlay_opacity)
+        self._overlay.set_alert_threshold(settings.temp_alert_celsius)
+        if settings.temp_overlay_hotkey:
+            ok, err = self._overlay.set_hotkey(settings.temp_overlay_hotkey)
+            if not ok and err:
+                self._on_status(err)
+        if settings.temp_overlay_enabled:
+            self._overlay.show_overlay()
+        self._is_loading = False
+
+    def _persist_settings(self, **updates: object) -> None:
+        settings = self._store.load_settings()
+        for key, value in updates.items():
+            setattr(settings, key, value)
+        self._store.save_settings(settings)
+
+
+class PingTabPage(QWidget):
+    def __init__(
+        self,
+        on_status: Callable[[str], None],
+        service: PingMonitorService,
+        overlay: PingOverlayWindow,
+    ) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = service
+        self._overlay = overlay
+        self._store = GeneralSettingsStore()
+        self._is_loading = False
+        self._host_histories: list[HistoryBuffer] = []
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(10)
+
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(10)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_inner = QWidget()
+        right_column = QVBoxLayout(right_inner)
+        right_column.setContentsMargins(0, 0, 4, 0)
+        right_column.setSpacing(10)
+        right_scroll.setWidget(right_inner)
+
+        # --- Metrics ---
+        metrics_box = RefPanelBox("Пинг")
+        metrics_layout = QVBoxLayout(metrics_box)
+        metrics_layout.setContentsMargins(12, 16, 12, 10)
+        metrics_layout.setSpacing(8)
+
+        self._cards_layout = QGridLayout()
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setHorizontalSpacing(8)
+        self._cards_layout.setVerticalSpacing(8)
+        self._metric_cards: list[MetricCard] = []
+        metrics_layout.addLayout(self._cards_layout)
+
+        self._chart = LineHistoryChart(max_points=60)
+        metrics_layout.addWidget(self._chart)
+        left_column.addWidget(metrics_box, 1)
+
+        # --- Hosts ---
+        hosts_box = RefPanelBox("Хосты")
+        hosts_layout = QVBoxLayout(hosts_box)
+        hosts_layout.setContentsMargins(12, 16, 12, 10)
+        hosts_layout.setSpacing(6)
+
+        self._hosts_list = QListWidget()
+        self._hosts_list.setMaximumHeight(120)
+        hosts_layout.addWidget(self._hosts_list)
+
+        host_inputs = QHBoxLayout()
+        host_inputs.setContentsMargins(0, 0, 0, 0)
+        host_inputs.setSpacing(6)
+        self._host_input = QLineEdit()
+        self._host_input.setPlaceholderText("IP или домен")
+        self._label_input = QLineEdit()
+        self._label_input.setPlaceholderText("Метка")
+        host_inputs.addWidget(self._host_input, 2)
+        host_inputs.addWidget(self._label_input, 1)
+        hosts_layout.addLayout(host_inputs)
+
+        host_btns = QHBoxLayout()
+        host_btns.setContentsMargins(0, 0, 0, 0)
+        host_btns.setSpacing(6)
+        self._add_host_btn = QPushButton("Добавить")
+        self._remove_host_btn = QPushButton("Удалить")
+        host_btns.addWidget(self._add_host_btn)
+        host_btns.addWidget(self._remove_host_btn)
+        hosts_layout.addLayout(host_btns)
+        right_column.addWidget(hosts_box)
+
+        # --- Overlay ---
+        overlay_box = RefPanelBox("Overlay")
+        overlay_layout = QVBoxLayout(overlay_box)
+        overlay_layout.setContentsMargins(12, 16, 12, 10)
+        overlay_layout.setSpacing(8)
+
+        overlay_actions = QHBoxLayout()
+        overlay_actions.setContentsMargins(0, 0, 0, 0)
+        overlay_actions.setSpacing(8)
+        self._start_btn = QPushButton("Включить overlay")
+        self._start_btn.setObjectName("PingOverlayStartButton")
+        self._stop_btn = QPushButton("Выключить overlay")
+        self._stop_btn.setObjectName("PingOverlayStopButton")
+        overlay_actions.addWidget(self._start_btn)
+        overlay_actions.addWidget(self._stop_btn)
+        overlay_layout.addLayout(overlay_actions)
+
+        hotkey_row = RefSelectRow("Горячая клавиша", _OVERLAY_HOTKEY_OPTIONS, "")
+        self._hotkey_combo = hotkey_row.combo
+        overlay_layout.addWidget(hotkey_row)
+
+        position_row = RefSelectRow("Позиция", _OVERLAY_POSITION_OPTIONS, "bottom_left")
+        self._position_combo = position_row.combo
+        overlay_layout.addWidget(position_row)
+
+        opacity_row = RefSliderRow("Прозрачность", 35, 100, 88, "%")
+        self._opacity_slider = opacity_row.slider
+        overlay_layout.addWidget(opacity_row)
+
+        alert_row = RefSliderRow("Порог (мс)", 10, 500, 80, " мс")
+        self._alert_slider = alert_row.slider
+        overlay_layout.addWidget(alert_row)
+        right_column.addWidget(overlay_box)
+
+        # --- Status ---
+        status_box = RefPanelBox("Статус")
+        status_layout = QVBoxLayout(status_box)
+        status_layout.setContentsMargins(12, 16, 12, 10)
+        status_layout.setSpacing(6)
+        self._last_ping_label = QLabel("Последнее обновление: —")
+        self._last_ping_label.setProperty("role", "ref_section")
+        self._last_ping_label.setWordWrap(True)
+        status_layout.addWidget(self._last_ping_label)
+        right_column.addWidget(status_box)
+        right_column.addStretch(1)
+
+        root.addLayout(left_column, 3)
+        root.addWidget(right_scroll, 2)
+
+        self._add_host_btn.clicked.connect(self._add_host)
+        self._remove_host_btn.clicked.connect(self._remove_host)
+        self._start_btn.clicked.connect(self._start_overlay)
+        self._stop_btn.clicked.connect(self._stop_overlay)
+        self._hotkey_combo.currentTextChanged.connect(self._on_hotkey_changed)
+        self._position_combo.currentTextChanged.connect(self._on_position_changed)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self._alert_slider.valueChanged.connect(self._on_alert_changed)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._refresh)
+
+        self._load_initial_state()
+
+    def on_shown(self) -> None:
+        self._refresh()
+        self._timer.start()
+
+    def on_hidden(self) -> None:
+        self._timer.stop()
+
+    def _refresh(self) -> None:
+        snap = self._service.get_snapshot()
+        self._overlay.update_snapshot(snap)
+        self._last_ping_label.setText(f"Последнее обновление: {snap.timestamp.strftime('%H:%M:%S')}")
+
+        # Ensure cards exist
+        while len(self._metric_cards) < len(snap.results):
+            card = MetricCard(snap.results[len(self._metric_cards)].label)
+            col = len(self._metric_cards) % 3
+            row = len(self._metric_cards) // 3
+            self._cards_layout.addWidget(card, row, col)
+            self._metric_cards.append(card)
+            self._host_histories.append(HistoryBuffer(60))
+
+        _colors = [QColor("#44dd66"), QColor("#30a8e8"), QColor("#e8a030"),
+                   QColor("#a044dd"), QColor("#dd4488")]
+        series = []
+        for i, res in enumerate(snap.results):
+            if i < len(self._metric_cards):
+                ms_text = "—" if res.ms is None else f"{res.ms:.0f} мс"
+                self._metric_cards[i].set_value(ms_text)
+                if res.ms is not None:
+                    self._host_histories[i].push(res.ms)
+                series.append((res.label, _colors[i % len(_colors)], self._host_histories[i].values()))
+
+        self._chart.set_series(series)
+
+    def _start_overlay(self) -> None:
+        self._overlay.show_overlay()
+        self._persist_settings(ping_overlay_enabled=True)
+
+    def _stop_overlay(self) -> None:
+        self._overlay.hide()
+        self._persist_settings(ping_overlay_enabled=False)
+
+    def _on_hotkey_changed(self, value: str) -> None:
+        if self._is_loading:
+            return
+        ok, error = self._overlay.set_hotkey(value)
+        if ok:
+            self._persist_settings(ping_overlay_hotkey=value)
+        elif error:
+            self._on_status(error)
+
+    def _on_position_changed(self, value: str) -> None:
+        self._overlay.set_overlay_position(value)
+        if not self._is_loading:
+            self._persist_settings(ping_overlay_position=value)
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self._overlay.set_overlay_opacity(value)
+        if not self._is_loading:
+            self._persist_settings(ping_overlay_opacity=value)
+
+    def _on_alert_changed(self, value: int) -> None:
+        self._overlay.set_alert_ms(value)
+        if not self._is_loading:
+            self._persist_settings(ping_alert_ms=value)
+
+    def _add_host(self) -> None:
+        host = self._host_input.text().strip()
+        label = self._label_input.text().strip() or host
+        if not host:
+            self._on_status("Введите IP или домен")
+            return
+        current_hosts = self._get_current_hosts()
+        if len(current_hosts) >= 5:
+            self._on_status("Максимум 5 хостов")
+            return
+        current_hosts.append([host, label])
+        self._apply_hosts(current_hosts)
+        self._host_input.clear()
+        self._label_input.clear()
+
+    def _remove_host(self) -> None:
+        row = self._hosts_list.currentRow()
+        current_hosts = self._get_current_hosts()
+        if row < 0 or row >= len(current_hosts):
+            return
+        current_hosts.pop(row)
+        self._apply_hosts(current_hosts)
+
+    def _get_current_hosts(self) -> list[list[str]]:
+        hosts = self._service._hosts
+        return [[h, l] for h, l in hosts]
+
+    def _apply_hosts(self, hosts: list[list[str]]) -> None:
+        pairs = [(h[0], h[1]) for h in hosts]
+        self._service.set_hosts(pairs)
+        self._hosts_list.clear()
+        for h, l in pairs:
+            self._hosts_list.addItem(f"{l}  ({h})")
+        self._persist_settings(ping_hosts_json=json.dumps(pairs, ensure_ascii=False))
+        self._metric_cards.clear()
+        self._host_histories.clear()
+        while self._cards_layout.count():
+            item = self._cards_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+    def _load_initial_state(self) -> None:
+        self._is_loading = True
+        settings = self._store.load_settings()
+
+        hosts = PingMonitorService.DEFAULT_HOSTS
+        if settings.ping_hosts_json:
+            try:
+                raw = json.loads(settings.ping_hosts_json)
+                if isinstance(raw, list) and raw:
+                    hosts = [(str(h[0]), str(h[1])) for h in raw if isinstance(h, (list, tuple)) and len(h) >= 2]
+            except (json.JSONDecodeError, IndexError):
+                pass
+        self._service.set_hosts(hosts)
+        self._hosts_list.clear()
+        for h, l in hosts:
+            self._hosts_list.addItem(f"{l}  ({h})")
+
+        if settings.ping_overlay_hotkey in _OVERLAY_HOTKEY_OPTIONS:
+            self._hotkey_combo.setCurrentText(settings.ping_overlay_hotkey)
+        self._position_combo.setCurrentText(settings.ping_overlay_position)
+        self._opacity_slider.setValue(settings.ping_overlay_opacity)
+        self._alert_slider.setValue(settings.ping_alert_ms)
+        self._overlay.set_overlay_position(settings.ping_overlay_position)
+        self._overlay.set_overlay_opacity(settings.ping_overlay_opacity)
+        self._overlay.set_alert_ms(settings.ping_alert_ms)
+        if settings.ping_overlay_hotkey:
+            ok, err = self._overlay.set_hotkey(settings.ping_overlay_hotkey)
+            if not ok and err:
+                self._on_status(err)
+        if settings.ping_overlay_enabled:
+            self._overlay.show_overlay()
+        self._is_loading = False
+
+    def _persist_settings(self, **updates: object) -> None:
+        settings = self._store.load_settings()
+        for key, value in updates.items():
+            setattr(settings, key, value)
+        self._store.save_settings(settings)
+
+
+class NetSpeedTabPage(QWidget):
+    def __init__(
+        self,
+        on_status: Callable[[str], None],
+        service: NetSpeedService,
+        overlay: NetSpeedOverlayWindow,
+    ) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = service
+        self._overlay = overlay
+        self._store = GeneralSettingsStore()
+        self._is_loading = False
+
+        self._down_history = HistoryBuffer(60)
+        self._up_history = HistoryBuffer(60)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(10)
+
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(10)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_inner = QWidget()
+        right_column = QVBoxLayout(right_inner)
+        right_column.setContentsMargins(0, 0, 4, 0)
+        right_column.setSpacing(10)
+        right_scroll.setWidget(right_inner)
+
+        metrics_box = RefPanelBox("Скорость сети")
+        metrics_layout = QVBoxLayout(metrics_box)
+        metrics_layout.setContentsMargins(12, 16, 12, 10)
+        metrics_layout.setSpacing(8)
+
+        cards = QGridLayout()
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.setHorizontalSpacing(8)
+        cards.setVerticalSpacing(8)
+        self._down_card = MetricCard("Загрузка ↓")
+        self._up_card = MetricCard("Отдача ↑")
+        cards.addWidget(self._down_card, 0, 0)
+        cards.addWidget(self._up_card, 0, 1)
+        metrics_layout.addLayout(cards)
+
+        self._chart = LineHistoryChart(max_points=60)
+        metrics_layout.addWidget(self._chart)
+        left_column.addWidget(metrics_box, 1)
+
+        overlay_box = RefPanelBox("Overlay")
+        overlay_layout = QVBoxLayout(overlay_box)
+        overlay_layout.setContentsMargins(12, 16, 12, 10)
+        overlay_layout.setSpacing(8)
+
+        overlay_actions = QHBoxLayout()
+        overlay_actions.setContentsMargins(0, 0, 0, 0)
+        overlay_actions.setSpacing(8)
+        self._start_btn = QPushButton("Включить overlay")
+        self._start_btn.setObjectName("NetSpeedOverlayStartButton")
+        self._stop_btn = QPushButton("Выключить overlay")
+        self._stop_btn.setObjectName("NetSpeedOverlayStopButton")
+        overlay_actions.addWidget(self._start_btn)
+        overlay_actions.addWidget(self._stop_btn)
+        overlay_layout.addLayout(overlay_actions)
+
+        hotkey_row = RefSelectRow("Горячая клавиша", _OVERLAY_HOTKEY_OPTIONS, "")
+        self._hotkey_combo = hotkey_row.combo
+        overlay_layout.addWidget(hotkey_row)
+
+        position_row = RefSelectRow("Позиция", _OVERLAY_POSITION_OPTIONS, "bottom_right")
+        self._position_combo = position_row.combo
+        overlay_layout.addWidget(position_row)
+
+        opacity_row = RefSliderRow("Прозрачность", 35, 100, 88, "%")
+        self._opacity_slider = opacity_row.slider
+        overlay_layout.addWidget(opacity_row)
+        right_column.addWidget(overlay_box)
+        right_column.addStretch(1)
+
+        root.addLayout(left_column, 3)
+        root.addWidget(right_scroll, 2)
+
+        self._start_btn.clicked.connect(self._start_overlay)
+        self._stop_btn.clicked.connect(self._stop_overlay)
+        self._hotkey_combo.currentTextChanged.connect(self._on_hotkey_changed)
+        self._position_combo.currentTextChanged.connect(self._on_position_changed)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._refresh)
+
+        self._load_initial_state()
+
+    def on_shown(self) -> None:
+        self._refresh()
+        self._timer.start()
+
+    def on_hidden(self) -> None:
+        self._timer.stop()
+
+    def _refresh(self) -> None:
+        snap = self._service.get_snapshot()
+        self._overlay.update_snapshot(snap)
+        from lolilend.monitoring import format_bytes_text
+        self._down_card.set_value(format_bytes_text(snap.download_bps))
+        self._up_card.set_value(format_bytes_text(snap.upload_bps))
+        self._down_history.push(snap.download_bps)
+        self._up_history.push(snap.upload_bps)
+        self._chart.set_series([
+            ("Загрузка", QColor("#30a8e8"), self._down_history.values()),
+            ("Отдача", QColor("#e85030"), self._up_history.values()),
+        ])
+
+    def _start_overlay(self) -> None:
+        self._overlay.show_overlay()
+        self._persist_settings(netspeed_overlay_enabled=True)
+
+    def _stop_overlay(self) -> None:
+        self._overlay.hide()
+        self._persist_settings(netspeed_overlay_enabled=False)
+
+    def _on_hotkey_changed(self, value: str) -> None:
+        if self._is_loading:
+            return
+        ok, error = self._overlay.set_hotkey(value)
+        if ok:
+            self._persist_settings(netspeed_overlay_hotkey=value)
+        elif error:
+            self._on_status(error)
+
+    def _on_position_changed(self, value: str) -> None:
+        self._overlay.set_overlay_position(value)
+        if not self._is_loading:
+            self._persist_settings(netspeed_overlay_position=value)
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self._overlay.set_overlay_opacity(value)
+        if not self._is_loading:
+            self._persist_settings(netspeed_overlay_opacity=value)
+
+    def _load_initial_state(self) -> None:
+        self._is_loading = True
+        settings = self._store.load_settings()
+        if settings.netspeed_overlay_hotkey in _OVERLAY_HOTKEY_OPTIONS:
+            self._hotkey_combo.setCurrentText(settings.netspeed_overlay_hotkey)
+        self._position_combo.setCurrentText(settings.netspeed_overlay_position)
+        self._opacity_slider.setValue(settings.netspeed_overlay_opacity)
+        self._overlay.set_overlay_position(settings.netspeed_overlay_position)
+        self._overlay.set_overlay_opacity(settings.netspeed_overlay_opacity)
+        if settings.netspeed_overlay_hotkey:
+            ok, err = self._overlay.set_hotkey(settings.netspeed_overlay_hotkey)
+            if not ok and err:
+                self._on_status(err)
+        if settings.netspeed_overlay_enabled:
+            self._overlay.show_overlay()
+        self._is_loading = False
+
+    def _persist_settings(self, **updates: object) -> None:
+        settings = self._store.load_settings()
+        for key, value in updates.items():
+            setattr(settings, key, value)
+        self._store.save_settings(settings)
+
+
+class TaskSchedulerTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None], service: TaskSchedulerService) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = service
+        self._tasks: list[ScheduledTask] = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
+        self._refresh_btn = QPushButton("Обновить")
+        self._enable_btn = QPushButton("Включить")
+        self._disable_btn = QPushButton("Выключить")
+        self._run_btn = QPushButton("Запустить")
+        self._delete_btn = QPushButton("Удалить")
+        self._delete_btn.setObjectName("TaskDeleteButton")
+        for btn in (self._refresh_btn, self._enable_btn, self._disable_btn, self._run_btn, self._delete_btn):
+            toolbar.addWidget(btn)
+        toolbar.addStretch(1)
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Поиск...")
+        self._search_edit.setMaximumWidth(200)
+        toolbar.addWidget(self._search_edit)
+        root.addLayout(toolbar)
+
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(["Задание", "Статус", "Следующий запуск", "Последний запуск", "Автор", "Путь"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        root.addWidget(self._table, 1)
+
+        self._info_label = QLabel("Всего: 0 | Активных: 0")
+        self._info_label.setProperty("role", "ref_section")
+        root.addWidget(self._info_label)
+
+        self._refresh_btn.clicked.connect(self._refresh_table)
+        self._enable_btn.clicked.connect(self._enable_selected)
+        self._disable_btn.clicked.connect(self._disable_selected)
+        self._run_btn.clicked.connect(self._run_selected)
+        self._delete_btn.clicked.connect(self._delete_selected)
+        self._search_edit.textChanged.connect(self._filter_table)
+
+    def on_shown(self) -> None:
+        if not self._tasks:
+            self._refresh_table()
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _refresh_table(self) -> None:
+        self._tasks = self._service.load_tasks()
+        self._table.setRowCount(0)
+        active = 0
+        for i, task in enumerate(self._tasks):
+            self._table.insertRow(i)
+            status_color = QColor("#44dd66") if task.status.lower() in ("ready", "running") else QColor("#a9b4c2")
+            if task.status.lower() == "disabled":
+                status_color = QColor("#888888")
+            else:
+                active += 1
+            for col, text in enumerate([task.name, task.status, task.next_run, task.last_run, task.author, task.path]):
+                item = QTableWidgetItem(text)
+                if col == 1:
+                    item.setForeground(status_color)
+                self._table.setItem(i, col, item)
+        self._info_label.setText(f"Всего: {len(self._tasks)} | Активных: {active}")
+        self._filter_table(self._search_edit.text())
+
+    def _filter_table(self, text: str) -> None:
+        lower = text.lower()
+        for row in range(self._table.rowCount()):
+            name_item = self._table.item(row, 0)
+            visible = not lower or (name_item is not None and lower in name_item.text().lower())
+            self._table.setRowHidden(row, not visible)
+
+    def _selected_task(self) -> ScheduledTask | None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._tasks):
+            return None
+        return self._tasks[row]
+
+    def _enable_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self._on_status("Выберите задание")
+            return
+        ok, msg = self._service.enable_task(task)
+        self._on_status(msg)
+        if ok:
+            self._refresh_table()
+
+    def _disable_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self._on_status("Выберите задание")
+            return
+        ok, msg = self._service.disable_task(task)
+        self._on_status(msg)
+        if ok:
+            self._refresh_table()
+
+    def _run_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self._on_status("Выберите задание")
+            return
+        ok, msg = self._service.run_task(task)
+        self._on_status(msg)
+
+    def _delete_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self._on_status("Выберите задание")
+            return
+        reply = QMessageBox.question(
+            self, "Удалить задание",
+            f"Удалить '{task.name}' из планировщика?\nЭто действие нельзя отменить.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = self._service.delete_task(task)
+        self._on_status(msg)
+        if ok:
+            self._refresh_table()
+
+
+class HostsManagerTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None], service: HostsManagerService) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = service
+        self._entries: list[HostEntry] = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
+        self._save_btn = QPushButton("Сохранить")
+        self._save_btn.setObjectName("HostsSaveButton")
+        self._backup_btn = QPushButton("Резервная копия")
+        self._refresh_btn = QPushButton("Обновить")
+        self._adblock_btn = QPushButton("Добавить AdBlock пресет")
+        for btn in (self._save_btn, self._backup_btn, self._refresh_btn, self._adblock_btn):
+            toolbar.addWidget(btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
+
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["IP", "Хост", "Комментарий", "Статус"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.cellDoubleClicked.connect(self._toggle_entry)
+        root.addWidget(self._table, 1)
+
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(0, 0, 0, 0)
+        add_row.setSpacing(6)
+        self._ip_edit = QLineEdit()
+        self._ip_edit.setPlaceholderText("IP (напр. 0.0.0.0)")
+        self._ip_edit.setMaximumWidth(160)
+        self._host_edit = QLineEdit()
+        self._host_edit.setPlaceholderText("Хост (напр. example.com)")
+        self._add_btn = QPushButton("Добавить")
+        self._remove_btn = QPushButton("Удалить")
+        add_row.addWidget(self._ip_edit)
+        add_row.addWidget(self._host_edit, 1)
+        add_row.addWidget(self._add_btn)
+        add_row.addWidget(self._remove_btn)
+        root.addLayout(add_row)
+
+        self._info_label = QLabel("Всего: 0 | Активных: 0 | Отключено: 0")
+        self._info_label.setProperty("role", "ref_section")
+        root.addWidget(self._info_label)
+
+        self._save_btn.clicked.connect(self._save_entries)
+        self._backup_btn.clicked.connect(self._make_backup)
+        self._refresh_btn.clicked.connect(self._refresh_table)
+        self._adblock_btn.clicked.connect(self._add_adblock)
+        self._add_btn.clicked.connect(self._add_entry)
+        self._remove_btn.clicked.connect(self._remove_entry)
+
+    def on_shown(self) -> None:
+        self._refresh_table()
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _refresh_table(self) -> None:
+        self._entries = self._service.load_entries()
+        self._rebuild_table()
+
+    def _rebuild_table(self) -> None:
+        self._table.setRowCount(0)
+        for i, entry in enumerate(self._entries):
+            self._table.insertRow(i)
+            status_text = "Вкл" if entry.enabled else "Выкл"
+            for col, text in enumerate([entry.ip, entry.hostname, entry.comment, status_text]):
+                item = QTableWidgetItem(text)
+                if not entry.enabled:
+                    item.setForeground(QColor("#888888"))
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                self._table.setItem(i, col, item)
+        enabled = sum(1 for e in self._entries if e.enabled)
+        disabled = len(self._entries) - enabled
+        self._info_label.setText(f"Всего: {len(self._entries)} | Активных: {enabled} | Отключено: {disabled}")
+
+    def _toggle_entry(self, row: int, _col: int = 0) -> None:
+        if row < 0 or row >= len(self._entries):
+            return
+        self._entries[row].enabled = not self._entries[row].enabled
+        self._rebuild_table()
+
+    def _add_entry(self) -> None:
+        ip = self._ip_edit.text().strip()
+        host = self._host_edit.text().strip()
+        if not ip or not host:
+            self._on_status("Введите IP и хост")
+            return
+        existing = {e.hostname for e in self._entries}
+        if host in existing:
+            self._on_status(f"Хост '{host}' уже существует")
+            return
+        self._entries.append(HostEntry(ip=ip, hostname=host, comment="", enabled=True))
+        self._ip_edit.clear()
+        self._host_edit.clear()
+        self._rebuild_table()
+
+    def _remove_entry(self) -> None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._entries):
+            self._on_status("Выберите запись")
+            return
+        del self._entries[row]
+        self._rebuild_table()
+
+    def _save_entries(self) -> None:
+        self._make_backup(silent=True)
+        ok, msg = self._service.save_entries(self._entries)
+        if ok:
+            self._on_status(msg)
+        else:
+            QMessageBox.warning(self, "Нет доступа", msg)
+
+    def _make_backup(self, silent: bool = False) -> None:
+        ok, path = self._service.backup(self._entries)
+        if not silent:
+            if ok:
+                self._on_status(f"Резервная копия: {path}")
+            else:
+                self._on_status(f"Ошибка резервной копии: {path}")
+
+    def _add_adblock(self) -> None:
+        self._entries = self._service.add_adblock_presets(self._entries)
+        self._rebuild_table()
+        self._on_status("AdBlock пресеты добавлены")
+
+
+class ClipboardTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._entries: list[str] = []
+        self._pinned: list[str] = []
+        self._max_size = 50
+        self._is_restoring = False
+
+        self._store = GeneralSettingsStore()
+        settings = self._store.load_settings()
+        self._max_size = settings.clipboard_history_size
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        title = QLabel("История буфера обмена")
+        title.setObjectName("SectionTitle")
+        note = QLabel(f"(последние {self._max_size} записей)")
+        note.setProperty("role", "ref_section")
+        header.addWidget(title)
+        header.addWidget(note)
+        header.addStretch(1)
+        self._size_spin = QSpinBox()
+        self._size_spin.setRange(10, 200)
+        self._size_spin.setValue(self._max_size)
+        self._size_spin.setSuffix(" записей")
+        self._size_spin.setMaximumWidth(130)
+        header.addWidget(self._size_spin)
+        root.addLayout(header)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Поиск...")
+        root.addWidget(self._search_edit)
+
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        root.addWidget(self._list, 1)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
+        self._copy_btn = QPushButton("Скопировать")
+        self._pin_btn = QPushButton("Закрепить")
+        self._del_btn = QPushButton("Удалить")
+        self._clear_btn = QPushButton("Очистить всё")
+        self._clear_btn.setObjectName("ClipboardClearButton")
+        for btn in (self._copy_btn, self._pin_btn, self._del_btn, self._clear_btn):
+            toolbar.addWidget(btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
+
+        self._info_label = QLabel("Записей: 0")
+        self._info_label.setProperty("role", "ref_section")
+        root.addWidget(self._info_label)
+
+        self._list.itemDoubleClicked.connect(self._copy_selected)
+        self._copy_btn.clicked.connect(self._copy_selected)
+        self._pin_btn.clicked.connect(self._toggle_pin)
+        self._del_btn.clicked.connect(self._delete_selected)
+        self._clear_btn.clicked.connect(self._clear_history)
+        self._search_edit.textChanged.connect(self._refresh_list)
+        self._size_spin.valueChanged.connect(self._on_size_changed)
+
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.dataChanged.connect(self._on_clipboard_changed)
+
+    def on_shown(self) -> None:
+        pass
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _on_clipboard_changed(self) -> None:
+        if self._is_restoring:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            return
+        text = clipboard.text()
+        if not text:
+            return
+        if self._entries and self._entries[0] == text:
+            return
+        self._entries.insert(0, text)
+        if len(self._entries) > self._max_size:
+            removed = self._entries[self._max_size:]
+            self._entries = self._entries[:self._max_size]
+            for r in removed:
+                if r in self._pinned:
+                    self._pinned.remove(r)
+        self._refresh_list()
+
+    def _refresh_list(self, _filter: str = "") -> None:
+        filter_text = self._search_edit.text().lower()
+        self._list.clear()
+        all_entries = self._pinned + [e for e in self._entries if e not in self._pinned]
+        for entry in all_entries:
+            if filter_text and filter_text not in entry.lower():
+                continue
+            display = entry[:120].replace("\n", " ↵ ")
+            self._list.addItem(display)
+            if entry in self._pinned:
+                last = self._list.item(self._list.count() - 1)
+                if last:
+                    font = last.font()
+                    font.setBold(True)
+                    last.setFont(font)
+                    last.setForeground(QColor("#e8a030"))
+        self._info_label.setText(f"Записей: {len(self._entries)} | Закреплено: {len(self._pinned)}")
+
+    def _get_selected_text(self) -> str | None:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        display = item.text()
+        filter_text = self._search_edit.text().lower()
+        all_entries = self._pinned + [e for e in self._entries if e not in self._pinned]
+        for entry in all_entries:
+            if filter_text and filter_text not in entry.lower():
+                continue
+            if entry[:120].replace("\n", " ↵ ") == display:
+                return entry
+        return None
+
+    def _copy_selected(self) -> None:
+        text = self._get_selected_text()
+        if text is None:
+            return
+        self._is_restoring = True
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+        self._is_restoring = False
+        self._on_status("Скопировано в буфер обмена")
+
+    def _toggle_pin(self) -> None:
+        text = self._get_selected_text()
+        if text is None:
+            return
+        if text in self._pinned:
+            self._pinned.remove(text)
+            self._on_status("Запись откреплена")
+        else:
+            self._pinned.append(text)
+            self._on_status("Запись закреплена")
+        self._refresh_list()
+
+    def _delete_selected(self) -> None:
+        text = self._get_selected_text()
+        if text is None:
+            return
+        if text in self._entries:
+            self._entries.remove(text)
+        if text in self._pinned:
+            self._pinned.remove(text)
+        self._refresh_list()
+
+    def _clear_history(self) -> None:
+        self._entries.clear()
+        self._pinned.clear()
+        self._refresh_list()
+        self._on_status("История буфера обмена очищена")
+
+    def _on_size_changed(self, value: int) -> None:
+        self._max_size = value
+        settings = self._store.load_settings()
+        settings.clipboard_history_size = value
+        self._store.save_settings(settings)
+
+
 def _animate_page_fade(page: QWidget) -> None:
     effect = QGraphicsOpacityEffect(page)
     page.setGraphicsEffect(effect)
@@ -3486,12 +5246,27 @@ def build_ui(
     analytics_service = GameAnalyticsService()
     fps_service = FpsMonitorService()
     fps_overlay = FpsOverlayWindow()
+    crosshair_overlay = CrosshairOverlayWindow()
+    temp_service = TempMonitorService()
+    temp_overlay = TempOverlayWindow()
+    ping_service = PingMonitorService()
+    ping_overlay = PingOverlayWindow()
+    netspeed_service = NetSpeedService()
+    netspeed_overlay = NetSpeedOverlayWindow()
+    task_scheduler_service = TaskSchedulerService()
+    hosts_manager_service = HostsManagerService()
     telegram_proxy_service = TelegramProxyService()
     discord_quest_service = DiscordQuestService()
     yandex_music_rpc_service = YandexMusicRpcService()
     root.destroyed.connect(lambda _=None: analytics_service.stop())
     root.destroyed.connect(lambda _=None: fps_service.close())
     root.destroyed.connect(lambda _=None: fps_overlay.shutdown())
+    root.destroyed.connect(lambda _=None: crosshair_overlay.shutdown())
+    root.destroyed.connect(lambda _=None: temp_overlay.shutdown())
+    root.destroyed.connect(lambda _=None: ping_overlay.shutdown())
+    root.destroyed.connect(lambda _=None: ping_service.close())
+    root.destroyed.connect(lambda _=None: netspeed_service.close())
+    root.destroyed.connect(lambda _=None: netspeed_overlay.shutdown())
     root.destroyed.connect(lambda _=None: telegram_proxy_service.shutdown())
     root.destroyed.connect(lambda _=None: discord_quest_service.shutdown())
     root.destroyed.connect(lambda _=None: yandex_music_rpc_service.shutdown())
@@ -3527,7 +5302,7 @@ def build_ui(
     sidebar_layout.addWidget(brand_container)
 
     for index, tab in enumerate(schema):
-        if tab.id in {"analytics", "security"}:
+        if tab.id in {"analytics", "security", "autostart"}:
             separator = QFrame()
             separator.setObjectName("NavSeparator")
             separator.setFrameShape(QFrame.Shape.HLine)
@@ -3562,6 +5337,51 @@ def build_ui(
             )
             lifecycle_pages[index] = page
             fps_page = page
+        elif tab.id == "crosshair":
+            page = CrosshairTabPage(
+                lambda message: emit_status(message, False),
+                crosshair_overlay,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "autostart":
+            page = AutostartTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
+        elif tab.id == "temperature":
+            page = TempTabPage(
+                lambda message: emit_status(message, False),
+                temp_service,
+                temp_overlay,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "ping_monitor":
+            page = PingTabPage(
+                lambda message: emit_status(message, False),
+                ping_service,
+                ping_overlay,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "netspeed_monitor":
+            page = NetSpeedTabPage(
+                lambda message: emit_status(message, False),
+                netspeed_service,
+                netspeed_overlay,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "task_scheduler":
+            page = TaskSchedulerTabPage(
+                lambda message: emit_status(message, False),
+                task_scheduler_service,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "hosts_manager":
+            page = HostsManagerTabPage(
+                lambda message: emit_status(message, False),
+                hosts_manager_service,
+            )
+            lifecycle_pages[index] = page
+        elif tab.id == "clipboard_manager":
+            page = ClipboardTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
         elif tab.id == "analytics":
             page = AnalyticsTabPage(lambda message: emit_status(message, False), analytics_service)
             lifecycle_pages[index] = page
