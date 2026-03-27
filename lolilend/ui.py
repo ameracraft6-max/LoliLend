@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 from typing import Protocol
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPointF, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPen, QPolygonF, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -90,18 +90,43 @@ _TRAY_ICON_PATH = _ICON_DIR / "general.svg"
 _FONT_REGISTERED = False
 
 # Background thread pool for heavy non-UI operations (registry scan, schtasks, WMI, ping).
-# Results are delivered back to the Qt main thread via QTimer.singleShot(0, ...).
+# Results are delivered back to the Qt main thread via a cross-thread Signal.
+# QTimer.singleShot from a background thread does NOT work — background threads have no
+# Qt event loop, so the timer never fires. A Signal emitted cross-thread is automatically
+# queued by Qt and delivered in the receiver object's (main) thread.
 _bg_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="lolilend_bg")
+
+
+class _Bridge(QObject):
+    """Delivers background-thread results to the main thread via a Qt queued signal."""
+    _deliver = Signal(object, object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._deliver.connect(self._on_deliver)
+
+    def post(self, cb: Callable, result: object) -> None:
+        self._deliver.emit(cb, result)
+
+    def _on_deliver(self, cb: Callable, result: object) -> None:
+        _safe_deliver(cb, result)
+
+
+_bridge: _Bridge | None = None
 
 
 def _run_bg(fn: Callable, on_done: Callable) -> None:
     """Submit fn() to the background pool; call on_done(result) safely on the main thread."""
+    global _bridge
+    if _bridge is None:
+        _bridge = _Bridge()
+    bridge = _bridge
     def _worker() -> None:
         try:
             result = fn()
         except Exception:
             result = None
-        QTimer.singleShot(0, lambda r=result: _safe_deliver(on_done, r))
+        bridge.post(on_done, result)
     _bg_pool.submit(_worker)
 
 
