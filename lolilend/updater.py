@@ -208,17 +208,46 @@ def build_install_and_relaunch_command(installer_path: Path, relaunch_command: s
 
 
 def spawn_install_and_relaunch(installer_path: Path, relaunch_command: str) -> None:
-    script = build_install_and_relaunch_command(installer_path, relaunch_command)
     if not _is_windows():
         raise UpdateError("Silent installer launch is supported on Windows only.")
-    creation_flags = 0
-    detached = getattr(subprocess, "DETACHED_PROCESS", 0)
-    new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    creation_flags |= detached | new_group
+
+    # Pre-flight: verify the downloaded file before closing the launcher
+    if not installer_path.exists():
+        raise UpdateError(f"Installer not found: {installer_path}")
+    if installer_path.stat().st_size == 0:
+        raise UpdateError("Installer file is empty.")
+
+    # Write a .bat file — avoids list2cmdline vs cmd.exe quoting incompatibility.
+    # When passing a list to Popen, Python escapes " as \" which cmd.exe does NOT understand:
+    # it strips the outer quotes then sees \"C:\... and misparses the entire command.
+    bat_path = installer_path.parent / "_lolilend_update.bat"
+    bat_lines = "\r\n".join([
+        "@echo off",
+        f'"{installer_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-',
+        "timeout /t 3 /nobreak >nul",
+        f'start "" {relaunch_command}',
+        "",
+    ])
+    # mbcs = Windows ANSI code page (CP1251 on Russian Windows) so cmd.exe reads paths correctly
+    bat_path.write_text(bat_lines, encoding="mbcs", errors="replace")
+
+    # CREATE_NO_WINDOW: no visible console window
+    # CREATE_NEW_PROCESS_GROUP: process survives launcher exit
+    # Pass as STRING (not list) to bypass list2cmdline and avoid " escaping issues.
+    # Double-outer-quote handles bat paths with spaces:
+    #   cmd /c ""path with spaces.bat"" → cmd strips outermost → "path with spaces.bat" ✓
+    creation_flags = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    )
+    bat_str = str(bat_path)
     subprocess.Popen(
-        ["cmd.exe", "/c", script],
+        f'cmd.exe /c ""{bat_str}""',
         creationflags=creation_flags,
         close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 

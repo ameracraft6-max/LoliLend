@@ -6,6 +6,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 
 @dataclass(slots=True)
 class ScheduledTask:
@@ -29,6 +31,7 @@ class TaskSchedulerService:
                 timeout=15,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=_NO_WINDOW,
             )
         except Exception:
             return []
@@ -67,6 +70,7 @@ class TaskSchedulerService:
                 timeout=10,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=_NO_WINDOW,
             )
             if result.returncode == 0:
                 return True, f"OK: {task_path}"

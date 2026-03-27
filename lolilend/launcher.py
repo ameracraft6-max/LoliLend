@@ -648,7 +648,7 @@ class LauncherWindow(QMainWindow):
             elif event == "log":
                 self._append_log(str(payload))
             elif event == "close":
-                QTimer.singleShot(350, self.close)
+                QTimer.singleShot(800, self.close)
             elif event == "worker_done":
                 self.check_button.setEnabled(True)
 

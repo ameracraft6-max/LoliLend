@@ -4,6 +4,8 @@ import os
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -76,6 +78,7 @@ class PingMonitorService:
                 capture_output=True,
                 text=True,
                 timeout=3,
+                creationflags=_NO_WINDOW,
             )
             return self._parse_ping_output(result.stdout)
         except Exception:

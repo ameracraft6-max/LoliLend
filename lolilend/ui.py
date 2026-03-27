@@ -89,6 +89,28 @@ _BACKGROUND_PATH = _ASSETS_DIR / "background_ref.png"
 _TRAY_ICON_PATH = _ICON_DIR / "general.svg"
 _FONT_REGISTERED = False
 
+# Background thread pool for heavy non-UI operations (registry scan, schtasks, WMI, ping).
+# Results are delivered back to the Qt main thread via QTimer.singleShot(0, ...).
+_bg_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="lolilend_bg")
+
+
+def _run_bg(fn: Callable, on_done: Callable) -> None:
+    """Submit fn() to the background pool; call on_done(result) safely on the main thread."""
+    def _worker() -> None:
+        try:
+            result = fn()
+        except Exception:
+            result = None
+        QTimer.singleShot(0, lambda r=result: _safe_deliver(on_done, r))
+    _bg_pool.submit(_worker)
+
+
+def _safe_deliver(fn: Callable, arg: object) -> None:
+    try:
+        fn(arg)
+    except RuntimeError:
+        pass  # widget was already destroyed – just ignore
+
 
 class _LifecyclePage(Protocol):
     def on_shown(self) -> None: ...
@@ -3966,7 +3988,12 @@ class AutostartTabPage(QWidget):
         pass
 
     def _refresh_table(self) -> None:
-        self._entries = self._manager.load_entries()
+        self._refresh_btn.setEnabled(False)
+        self._info_label.setText("Загрузка...")
+        _run_bg(self._manager.load_entries, self._apply_entries)
+
+    def _apply_entries(self, entries: list[AutostartEntry] | None) -> None:
+        self._entries = entries or []
         self._table.setRowCount(0)
         for i, entry in enumerate(self._entries):
             self._table.insertRow(i)
@@ -3982,6 +4009,7 @@ class AutostartTabPage(QWidget):
         self._info_label.setText(
             f"Всего: {len(self._entries)} | Включено: {enabled_count} | Выключено: {len(self._entries) - enabled_count}"
         )
+        self._refresh_btn.setEnabled(True)
 
     def _selected_entry(self) -> AutostartEntry | None:
         row = self._table.currentRow()
@@ -4037,6 +4065,7 @@ class TempTabPage(QWidget):
         self._overlay = overlay
         self._store = GeneralSettingsStore()
         self._is_loading = False
+        self._is_refreshing = False
 
         self._cpu_history = HistoryBuffer(60)
         self._gpu_history = HistoryBuffer(60)
@@ -4152,7 +4181,15 @@ class TempTabPage(QWidget):
         self._timer.stop()
 
     def _refresh(self) -> None:
-        snap = self._service.get_snapshot()
+        if self._is_refreshing:
+            return
+        self._is_refreshing = True
+        _run_bg(self._service.get_snapshot, self._apply_snapshot)
+
+    def _apply_snapshot(self, snap) -> None:
+        self._is_refreshing = False
+        if snap is None:
+            return
         self._overlay.update_snapshot(snap)
 
         cpu_text = "N/A" if snap.cpu_temp is None else f"{snap.cpu_temp:.0f} °C"
@@ -4243,6 +4280,7 @@ class PingTabPage(QWidget):
         self._overlay = overlay
         self._store = GeneralSettingsStore()
         self._is_loading = False
+        self._is_refreshing = False
         self._host_histories: list[HistoryBuffer] = []
 
         root = QHBoxLayout(self)
@@ -4383,7 +4421,15 @@ class PingTabPage(QWidget):
         self._timer.stop()
 
     def _refresh(self) -> None:
-        snap = self._service.get_snapshot()
+        if self._is_refreshing:
+            return
+        self._is_refreshing = True
+        _run_bg(self._service.get_snapshot, self._apply_snapshot)
+
+    def _apply_snapshot(self, snap: PingSnapshot | None) -> None:
+        self._is_refreshing = False
+        if snap is None:
+            return
         self._overlay.update_snapshot(snap)
         self._last_ping_label.setText(f"Последнее обновление: {snap.timestamp.strftime('%H:%M:%S')}")
 
@@ -4753,7 +4799,14 @@ class TaskSchedulerTabPage(QWidget):
         pass
 
     def _refresh_table(self) -> None:
-        self._tasks = self._service.load_tasks()
+        self._refresh_btn.setEnabled(False)
+        self._info_label.setText("Загрузка задач...")
+        for btn in (self._enable_btn, self._disable_btn, self._run_btn, self._delete_btn):
+            btn.setEnabled(False)
+        _run_bg(self._service.load_tasks, self._apply_tasks)
+
+    def _apply_tasks(self, tasks: list[ScheduledTask] | None) -> None:
+        self._tasks = tasks or []
         self._table.setRowCount(0)
         active = 0
         for i, task in enumerate(self._tasks):
@@ -4770,6 +4823,8 @@ class TaskSchedulerTabPage(QWidget):
                 self._table.setItem(i, col, item)
         self._info_label.setText(f"Всего: {len(self._tasks)} | Активных: {active}")
         self._filter_table(self._search_edit.text())
+        for btn in (self._refresh_btn, self._enable_btn, self._disable_btn, self._run_btn, self._delete_btn):
+            btn.setEnabled(True)
 
     def _filter_table(self, text: str) -> None:
         lower = text.lower()
