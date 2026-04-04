@@ -51,6 +51,8 @@ from PySide6.QtWidgets import (
 
 from lolilend.ai_ui import AiTabPage
 from lolilend.video_to_gif import GifSettings, VideoToGifService
+from lolilend.system_cleaner import SystemCleanerService, format_size as clean_format_size
+from lolilend.disk_health import get_snapshot as get_disk_snapshot, format_size as disk_format_size
 from lolilend.crosshair_overlay import CrosshairConfig, CrosshairOverlayWindow, CROSSHAIR_STYLE_OPTIONS, render_crosshair
 from lolilend.analytics import AnalyticsSummary, GameAnalyticsService, LiveGameEntry, TopGameEntry, format_duration
 from lolilend.discord_quests import DiscordQuestService
@@ -1527,6 +1529,244 @@ class SecurityLinkCard(QFrame):
             self._on_status(f"{_STATUS_OPENED}: {self._item.title}")
             return
         self._on_status(f"{_STATUS_OPEN_FAILED}: {self._item.url}")
+
+
+class SystemCleanerTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = SystemCleanerService()
+        self._checkboxes: list[tuple[QCheckBox, int]] = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        box = RefPanelBox("Очистка системы")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(12, 16, 12, 10)
+        layout.setSpacing(8)
+
+        scan_row = QHBoxLayout()
+        scan_row.setSpacing(8)
+        self._scan_btn = QPushButton("Сканировать")
+        self._scan_btn.clicked.connect(self._start_scan)
+        scan_row.addWidget(self._scan_btn)
+        self._scan_status = QLabel("")
+        scan_row.addWidget(self._scan_status, 1)
+        layout.addLayout(scan_row)
+
+        self._categories_frame = QFrame()
+        self._categories_layout = QVBoxLayout(self._categories_frame)
+        self._categories_layout.setContentsMargins(0, 0, 0, 0)
+        self._categories_layout.setSpacing(4)
+        self._categories_frame.setVisible(False)
+        layout.addWidget(self._categories_frame)
+
+        self._total_label = QLabel("")
+        self._total_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self._total_label.setVisible(False)
+        layout.addWidget(self._total_label)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setVisible(False)
+        layout.addWidget(self._progress)
+
+        self._clean_btn = QPushButton("Очистить выбранное")
+        self._clean_btn.setVisible(False)
+        self._clean_btn.clicked.connect(self._start_clean)
+        layout.addWidget(self._clean_btn)
+
+        self._result_label = QLabel("")
+        self._result_label.setWordWrap(True)
+        layout.addWidget(self._result_label)
+
+        root.addWidget(box)
+        root.addStretch(1)
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(300)
+        self._poll_timer.timeout.connect(self._poll)
+
+    def on_shown(self) -> None:
+        pass
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _start_scan(self) -> None:
+        if self._service.running:
+            return
+        self._scan_btn.setEnabled(False)
+        self._scan_status.setText("Сканирование...")
+        self._result_label.setText("")
+        self._clean_btn.setVisible(False)
+        self._total_label.setVisible(False)
+        self._categories_frame.setVisible(False)
+        self._service.start_scan()
+        self._poll_timer.start()
+
+    def _start_clean(self) -> None:
+        if self._service.running:
+            return
+        cats = self._service.categories
+        for cb, idx in self._checkboxes:
+            if idx < len(cats):
+                cats[idx].checked = cb.isChecked()
+        self._clean_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._result_label.setText("Очистка...")
+        self._service.start_clean(cats)
+        self._poll_timer.start()
+
+    def _poll(self) -> None:
+        if self._service.running:
+            if self._service.mode == "clean":
+                cur, total = self._service.progress
+                if total > 0:
+                    self._progress.setValue(int(cur * 100 / total))
+            return
+
+        self._poll_timer.stop()
+        self._scan_btn.setEnabled(True)
+
+        if self._service.mode == "scan":
+            cats = self._service.categories
+            self._build_category_list(cats)
+            self._scan_status.setText(f"Найдено {len(cats)} категорий")
+        elif self._service.mode == "clean":
+            result = self._service.result
+            if result:
+                self._progress.setValue(100)
+                self._result_label.setText(
+                    f"Освобождено: {clean_format_size(result.freed_bytes)} "
+                    f"({result.deleted_files} файлов)"
+                )
+                self._result_label.setStyleSheet("color: #56ff98;")
+                self._on_status(f"Очистка завершена: {clean_format_size(result.freed_bytes)}")
+                self._clean_btn.setEnabled(True)
+
+    def _build_category_list(self, cats) -> None:
+        # Clear old
+        while self._categories_layout.count():
+            item = self._categories_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._checkboxes.clear()
+
+        for i, cat in enumerate(cats):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            cb = QCheckBox(cat.name)
+            cb.setChecked(cat.checked)
+            cb.toggled.connect(self._update_total)
+            row.addWidget(cb, 1)
+            size_label = QLabel(clean_format_size(cat.size_bytes))
+            size_label.setStyleSheet("color: #ff9dc6;")
+            size_label.setMinimumWidth(80)
+            row.addWidget(size_label)
+            self._checkboxes.append((cb, i))
+            container = QWidget()
+            container.setLayout(row)
+            self._categories_layout.addWidget(container)
+
+        self._categories_frame.setVisible(True)
+        self._clean_btn.setVisible(True)
+        self._clean_btn.setEnabled(True)
+        self._total_label.setVisible(True)
+        self._update_total()
+
+    def _update_total(self) -> None:
+        cats = self._service.categories
+        total = 0
+        for cb, idx in self._checkboxes:
+            if cb.isChecked() and idx < len(cats):
+                total += cats[idx].size_bytes
+        self._total_label.setText(f"К удалению: {clean_format_size(total)}")
+
+
+class DiskHealthTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        # Disk info box
+        self._disk_box = RefPanelBox("Физические диски")
+        self._disk_layout = QVBoxLayout(self._disk_box)
+        self._disk_layout.setContentsMargins(12, 16, 12, 10)
+        self._disk_layout.setSpacing(8)
+        root.addWidget(self._disk_box)
+
+        # Partitions box
+        self._part_box = RefPanelBox("Разделы")
+        part_layout = QVBoxLayout(self._part_box)
+        part_layout.setContentsMargins(12, 16, 12, 10)
+        part_layout.setSpacing(8)
+
+        self._part_table = QTableWidget(0, 5)
+        self._part_table.setHorizontalHeaderLabels(["Раздел", "Файловая система", "Размер", "Использовано", "Свободно"])
+        self._part_table.horizontalHeader().setStretchLastSection(True)
+        self._part_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._part_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        part_layout.addWidget(self._part_table)
+
+        refresh_btn = QPushButton("Обновить")
+        refresh_btn.clicked.connect(self._refresh)
+        part_layout.addWidget(refresh_btn)
+
+        root.addWidget(self._part_box)
+        root.addStretch(1)
+
+    def on_shown(self) -> None:
+        self._refresh()
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _refresh(self) -> None:
+        snapshot = get_disk_snapshot()
+
+        # Clear disk info
+        while self._disk_layout.count():
+            item = self._disk_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for disk in snapshot.disks:
+            status_icon = {"Healthy": "✅", "Warning": "⚠️", "Critical": "❌"}.get(disk.status, "❓")
+            temp_str = f" | {disk.temperature}°C" if disk.temperature else ""
+            text = (
+                f"{disk.model} ({disk.media_type})\n"
+                f"Статус: {status_icon} {disk.status}{temp_str} | "
+                f"Размер: {disk_format_size(disk.size_bytes)}"
+            )
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setStyleSheet("padding: 6px; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;")
+            self._disk_layout.addWidget(label)
+
+        if not snapshot.disks:
+            self._disk_layout.addWidget(QLabel("Не удалось получить информацию о дисках"))
+
+        # Partitions table
+        self._part_table.setRowCount(len(snapshot.partitions))
+        for i, p in enumerate(snapshot.partitions):
+            pct_bar = f"{'█' * int(p.percent / 10)}{'░' * (10 - int(p.percent / 10))} {p.percent:.0f}%"
+            self._part_table.setItem(i, 0, QTableWidgetItem(p.mountpoint))
+            self._part_table.setItem(i, 1, QTableWidgetItem(p.fstype))
+            self._part_table.setItem(i, 2, QTableWidgetItem(disk_format_size(p.total_bytes)))
+            self._part_table.setItem(i, 3, QTableWidgetItem(pct_bar))
+            self._part_table.setItem(i, 4, QTableWidgetItem(disk_format_size(p.free_bytes)))
+
+        self._part_table.resizeColumnsToContents()
+        self._on_status(f"Диски: {len(snapshot.disks)} физ., {len(snapshot.partitions)} разделов")
 
 
 class VideoToGifTabPage(QWidget):
@@ -5660,6 +5900,11 @@ def build_ui(
             lifecycle_pages[index] = page
         elif tab.id == "video_to_gif":
             page = VideoToGifTabPage(lambda message: emit_status(message, False))
+        elif tab.id == "system_cleaner":
+            page = SystemCleanerTabPage(lambda message: emit_status(message, False))
+        elif tab.id == "disk_health":
+            page = DiskHealthTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
         else:
             page = _build_tab_page(tab, lambda message: emit_status(message, False))
 
