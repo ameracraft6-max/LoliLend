@@ -747,26 +747,9 @@ class LauncherWindow(QMainWindow):
         self._append_log("Main application launched.")
         self.close()
 
-    @staticmethod
-    def _is_compiled() -> bool:
-        """True when running as PyInstaller or Nuitka compiled binary."""
-        if getattr(sys, "frozen", False):
-            return True  # PyInstaller
-        # Nuitka: sys.argv[0] is the real exe, check if it's not a .py script
-        argv0 = sys.argv[0] if sys.argv else ""
-        return not argv0.endswith(".py") and not argv0.endswith(".pyc")
-
-    @staticmethod
-    def _compiled_exe_path() -> Path:
-        """Return path to the compiled exe (works for both PyInstaller and Nuitka)."""
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve()
-        # Nuitka: sys.argv[0] is the real exe path
-        return Path(sys.argv[0]).resolve()
-
     def _app_launch_command(self) -> list[str]:
-        if self._is_compiled():
-            return [str(self._compiled_exe_path()), APP_MODE_FLAG]
+        if getattr(sys, "frozen", False):
+            return [str(Path(sys.executable).resolve()), APP_MODE_FLAG]
         script = Path(sys.argv[0]).resolve()
         return [str(Path(sys.executable).resolve()), str(script), APP_MODE_FLAG]
 
@@ -777,8 +760,8 @@ class LauncherWindow(QMainWindow):
         return env
 
     def _launcher_relaunch_command(self) -> str:
-        if self._is_compiled():
-            return f"\"{self._compiled_exe_path()}\""
+        if getattr(sys, "frozen", False):
+            return f"\"{Path(sys.executable).resolve()}\""
         script = Path(sys.argv[0]).resolve()
         python = Path(sys.executable).resolve()
         return f"\"{python}\" \"{script}\""
