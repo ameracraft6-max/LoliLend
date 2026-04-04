@@ -14,7 +14,6 @@ Gaming portal desktop application for Windows.
 - Windows autostart, task scheduler, hosts manager
 - Clipboard manager
 - Profile system with 4 visual themes
-- License system with HWID binding
 
 ## Download
 
