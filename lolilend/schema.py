@@ -371,6 +371,7 @@ tabs_schema: list[TabSpec] = [
             ),
         ],
     ),
+    TabSpec(id="video_to_gif", title="Video \u2192 GIF", icon="video_to_gif", sections=[]),
 ]
 
 

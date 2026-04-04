@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from lolilend.ai_ui import AiTabPage
+from lolilend.video_to_gif import GifSettings, VideoToGifService
 from lolilend.crosshair_overlay import CrosshairConfig, CrosshairOverlayWindow, CROSSHAIR_STYLE_OPTIONS, render_crosshair
 from lolilend.analytics import AnalyticsSummary, GameAnalyticsService, LiveGameEntry, TopGameEntry, format_duration
 from lolilend.discord_quests import DiscordQuestService
@@ -1525,6 +1526,167 @@ class SecurityLinkCard(QFrame):
             self._on_status(f"{_STATUS_OPENED}: {self._item.title}")
             return
         self._on_status(f"{_STATUS_OPEN_FAILED}: {self._item.url}")
+
+
+class VideoToGifTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = VideoToGifService()
+        self._input_path = ""
+        self._output_path = ""
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        # File selection
+        file_box = RefPanelBox("Video to GIF")
+        file_layout = QVBoxLayout(file_box)
+        file_layout.setContentsMargins(12, 16, 12, 10)
+        file_layout.setSpacing(8)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(8)
+        self._select_btn = QPushButton("Выбрать видео")
+        self._select_btn.clicked.connect(self._pick_file)
+        file_row.addWidget(self._select_btn)
+        self._file_label = QLabel("Файл не выбран")
+        self._file_label.setWordWrap(True)
+        file_row.addWidget(self._file_label, 1)
+        file_layout.addLayout(file_row)
+
+        # Settings
+        self._fps_row = RefSliderRow("FPS", 5, 30, 15, "")
+        file_layout.addWidget(self._fps_row)
+
+        self._width_row = RefSliderRow("Ширина", 120, 1280, 480, " px")
+        file_layout.addWidget(self._width_row)
+
+        self._quality_row = RefSliderRow("Качество", 10, 100, 80, "%")
+        file_layout.addWidget(self._quality_row)
+
+        self._start_row = RefSliderRow("Начало", 0, 300, 0, " сек")
+        file_layout.addWidget(self._start_row)
+
+        self._end_row = RefSliderRow("Конец (0 = всё)", 0, 300, 0, " сек")
+        file_layout.addWidget(self._end_row)
+
+        # Convert button + progress
+        convert_row = QHBoxLayout()
+        convert_row.setSpacing(8)
+        self._convert_btn = QPushButton("Конвертировать")
+        self._convert_btn.setEnabled(False)
+        self._convert_btn.clicked.connect(self._start_conversion)
+        convert_row.addWidget(self._convert_btn)
+        convert_row.addStretch(1)
+        file_layout.addLayout(convert_row)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setVisible(False)
+        file_layout.addWidget(self._progress)
+
+        # Result
+        self._result_label = QLabel("")
+        self._result_label.setWordWrap(True)
+        file_layout.addWidget(self._result_label)
+
+        self._open_folder_btn = QPushButton("Открыть папку")
+        self._open_folder_btn.setVisible(False)
+        self._open_folder_btn.clicked.connect(self._open_output_folder)
+        file_layout.addWidget(self._open_folder_btn)
+
+        root.addWidget(file_box)
+        root.addStretch(1)
+
+        # Poll timer for conversion progress
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(200)
+        self._poll_timer.timeout.connect(self._poll_progress)
+
+    def on_shown(self) -> None:
+        pass
+
+    def on_hidden(self) -> None:
+        pass
+
+    def _pick_file(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать видео",
+            "",
+            "Видео (*.mp4 *.avi *.mov *.webm *.mkv *.flv *.wmv);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        self._input_path = path
+        name = Path(path).name
+        self._file_label.setText(name)
+        self._convert_btn.setEnabled(True)
+        self._result_label.setText("")
+        self._open_folder_btn.setVisible(False)
+        self._on_status(f"Выбрано: {name}")
+
+    def _start_conversion(self) -> None:
+        if not self._input_path or self._service.running:
+            return
+
+        inp = Path(self._input_path)
+        out_dir = inp.parent / "gif_output"
+        out_dir.mkdir(exist_ok=True)
+        self._output_path = str(out_dir / f"{inp.stem}.gif")
+
+        settings = GifSettings(
+            fps=self._fps_row.slider.value(),
+            width=self._width_row.slider.value(),
+            quality=self._quality_row.slider.value(),
+            start_sec=float(self._start_row.slider.value()),
+            end_sec=float(self._end_row.slider.value()),
+        )
+
+        self._convert_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._result_label.setText("Конвертация...")
+        self._open_folder_btn.setVisible(False)
+
+        self._service.start(self._input_path, self._output_path, settings)
+        self._poll_timer.start()
+
+    def _poll_progress(self) -> None:
+        current, total = self._service.progress
+        if total > 0:
+            pct = int(current * 100 / total)
+            self._progress.setValue(pct)
+
+        if not self._service.running:
+            self._poll_timer.stop()
+            self._convert_btn.setEnabled(True)
+            result = self._service.result
+            if result and result.success:
+                size_mb = result.file_size / (1024 * 1024)
+                self._progress.setValue(100)
+                self._result_label.setText(
+                    f"Готово: {Path(result.output_path).name} "
+                    f"({size_mb:.1f} MB, {result.frame_count} кадров)"
+                )
+                self._result_label.setStyleSheet("")
+                self._open_folder_btn.setVisible(True)
+                self._on_status(f"GIF создан: {Path(result.output_path).name}")
+            elif result:
+                self._result_label.setText(f"Ошибка: {result.message}")
+                self._result_label.setStyleSheet("color: #ff5a5a;")
+                self._progress.setVisible(False)
+
+    def _open_output_folder(self) -> None:
+        if self._output_path:
+            import os
+            folder = str(Path(self._output_path).parent)
+            if os.name == "nt":
+                os.startfile(folder)
 
 
 class SecurityLinksPage(QWidget):
@@ -5495,6 +5657,8 @@ def build_ui(
         elif tab.id == "ai":
             page = AiTabPage(lambda message: emit_status(message, False))
             lifecycle_pages[index] = page
+        elif tab.id == "video_to_gif":
+            page = VideoToGifTabPage(lambda message: emit_status(message, False))
         else:
             page = _build_tab_page(tab, lambda message: emit_status(message, False))
 

@@ -1,4 +1,4 @@
 APP_NAME = "LoliLend"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_PUBLISHER = "LoliLend"
 APP_EXE_NAME = "LoliLend.exe"
