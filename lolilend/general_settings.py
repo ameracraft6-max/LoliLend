@@ -98,11 +98,6 @@ class GeneralSettings:
     netspeed_overlay_position: str = "bottom_right"
     netspeed_overlay_opacity: int = 88
     clipboard_history_size: int = 50
-    license_server_url: str = "http://localhost:8080"
-    license_token: str = ""
-    license_key: str = ""
-    license_expires_at: str = ""
-    license_status: str = ""
 
 
 VALID_CROSSHAIR_STYLES: frozenset[str] = frozenset({
@@ -355,11 +350,6 @@ class GeneralSettingsStore:
             settings.netspeed_overlay_position = "bottom_right"
         settings.netspeed_overlay_opacity = self._clamp_int(settings_raw.get("netspeed_overlay_opacity", settings.netspeed_overlay_opacity), 35, 100)
         settings.clipboard_history_size = self._clamp_int(settings_raw.get("clipboard_history_size", settings.clipboard_history_size), 10, 200)
-        settings.license_server_url = str(settings_raw.get("license_server_url", settings.license_server_url)).strip() or "http://localhost:8080"
-        settings.license_token = str(settings_raw.get("license_token", settings.license_token))
-        settings.license_key = str(settings_raw.get("license_key", settings.license_key))
-        settings.license_expires_at = str(settings_raw.get("license_expires_at", settings.license_expires_at))
-        settings.license_status = str(settings_raw.get("license_status", settings.license_status))
         return settings
 
     def save_settings(self, settings: GeneralSettings) -> None:

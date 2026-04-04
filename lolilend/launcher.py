@@ -36,8 +36,6 @@ from PySide6.QtWidgets import (
 )
 
 from lolilend.general_settings import GeneralSettingsStore
-from lolilend.license_client import LicenseClient, LicenseError
-from lolilend.license_hwid import get_hwid
 from lolilend.runtime import asset_path
 from lolilend.updater import (
     ReleaseConfig,
@@ -238,18 +236,13 @@ class LauncherWindow(QMainWindow):
         self._set_update_state(UpdateState.UP_TO_DATE, f"Текущая версия: {APP_VERSION}")
         self._append_log("Launcher initialized.")
 
-        # Block Play until license verified
-        self._license_verified = False
-        self.launch_app_button.setEnabled(False)
-
         self._event_timer = QTimer(self)
         self._event_timer.setInterval(120)
         self._event_timer.timeout.connect(self._drain_events)
         self._event_timer.start()
 
         if auto_start_check and self._settings.auto_update_enabled:
-            # Delay update check — license check starts first (at 300ms)
-            QTimer.singleShot(800, lambda: self._start_update_if_licensed())
+            QTimer.singleShot(450, lambda: self.start_update_flow(auto_install=True))
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._executor.shutdown(wait=False, cancel_futures=True)
@@ -308,15 +301,12 @@ class LauncherWindow(QMainWindow):
         self.home_nav = self._make_nav_button("Главная")
         self.settings_nav = self._make_nav_button("Настройки")
         self.logs_nav = self._make_nav_button("Логи")
-        self.license_nav = self._make_nav_button("Лицензия")
         self._nav_group.addButton(self.home_nav, 0)
         self._nav_group.addButton(self.settings_nav, 1)
         self._nav_group.addButton(self.logs_nav, 2)
-        self._nav_group.addButton(self.license_nav, 3)
         top_layout.addWidget(self.home_nav)
         top_layout.addWidget(self.settings_nav)
         top_layout.addWidget(self.logs_nav)
-        top_layout.addWidget(self.license_nav)
         top_layout.addStretch(1)
 
         self.launch_app_button = QPushButton("Запустить лаунчер")
@@ -337,11 +327,9 @@ class LauncherWindow(QMainWindow):
         self.home_page = self._build_home_page()
         self.settings_page = self._build_settings_page()
         self.logs_page = self._build_logs_page()
-        self.license_page = self._build_license_page()
         self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.settings_page)
         self.stack.addWidget(self.logs_page)
-        self.stack.addWidget(self.license_page)
 
         self.status_tip = QLabel("Состояние: готово к запуску.")
         self.status_tip.setObjectName("LauncherFooter")
@@ -468,15 +456,9 @@ class LauncherWindow(QMainWindow):
         self.asset_pattern_edit.setObjectName("LauncherAssetPatternEdit")
         settings_layout.addWidget(self.asset_pattern_edit, 1, 1)
 
-        license_url_label = QLabel("License Server URL")
-        settings_layout.addWidget(license_url_label, 2, 0)
-        self.license_url_edit = QLineEdit()
-        self.license_url_edit.setObjectName("LauncherLicenseUrlEdit")
-        settings_layout.addWidget(self.license_url_edit, 2, 1)
-
         self.auto_update_checkbox = QCheckBox("Автообновление при старте")
         self.auto_update_checkbox.setObjectName("LauncherAutoUpdateCheck")
-        settings_layout.addWidget(self.auto_update_checkbox, 3, 1)
+        settings_layout.addWidget(self.auto_update_checkbox, 2, 1)
 
         actions = QHBoxLayout()
         self.save_settings_button = QPushButton("Сохранить")
@@ -486,7 +468,7 @@ class LauncherWindow(QMainWindow):
         actions.addWidget(self.save_settings_button)
         actions.addWidget(self.open_data_folder_button)
         actions.addStretch(1)
-        settings_layout.addLayout(actions, 4, 1)
+        settings_layout.addLayout(actions, 3, 1)
 
         layout.addWidget(settings_card)
         layout.addStretch(1)
@@ -503,83 +485,6 @@ class LauncherWindow(QMainWindow):
         layout.addWidget(self.logs_view, 1)
         return page
 
-    def _build_license_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
-
-        card = QFrame()
-        card.setObjectName("LauncherLicenseCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(24, 24, 24, 24)
-        card_layout.setSpacing(14)
-
-        heading = QLabel("Активация лицензии")
-        heading.setObjectName("LauncherLicenseTitle")
-        card_layout.addWidget(heading)
-
-        # License status display
-        self.license_status_chip = QLabel("НЕ АКТИВИРОВАНА")
-        self.license_status_chip.setObjectName("LauncherLicenseStatusChip")
-        self.license_status_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.license_status_chip.setFixedWidth(220)
-        card_layout.addWidget(self.license_status_chip, 0, Qt.AlignmentFlag.AlignLeft)
-
-        self.license_info_label = QLabel("")
-        self.license_info_label.setObjectName("LauncherLicenseInfo")
-        self.license_info_label.setWordWrap(True)
-        card_layout.addWidget(self.license_info_label)
-
-        # Key input
-        key_label = QLabel("Введите лицензионный ключ:")
-        key_label.setObjectName("LauncherLicenseKeyLabel")
-        card_layout.addWidget(key_label)
-
-        key_row = QHBoxLayout()
-        key_row.setSpacing(10)
-        self.license_key_edit = QLineEdit()
-        self.license_key_edit.setObjectName("LauncherLicenseKeyEdit")
-        self.license_key_edit.setPlaceholderText("LOLI-XXXX-XXXX-XXXX-XXXX")
-        self.license_key_edit.setMaxLength(24)
-        key_row.addWidget(self.license_key_edit, 1)
-
-        self.activate_button = QPushButton("Активировать")
-        self.activate_button.setObjectName("LauncherActivateButton")
-        self.activate_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        key_row.addWidget(self.activate_button)
-        card_layout.addLayout(key_row)
-
-        # Activation spinner
-        self.license_spinner = PulseSpinner()
-        self.license_spinner.setVisible(False)
-        card_layout.addWidget(self.license_spinner, 0, Qt.AlignmentFlag.AlignLeft)
-
-        # Activation result message
-        self.license_result_label = QLabel("")
-        self.license_result_label.setObjectName("LauncherLicenseResult")
-        self.license_result_label.setWordWrap(True)
-        card_layout.addWidget(self.license_result_label)
-
-        # HWID display (for support)
-        hwid_row = QHBoxLayout()
-        hwid_row.setSpacing(8)
-        hwid_label = QLabel("Ваш HWID:")
-        hwid_label.setObjectName("LauncherHwidLabel")
-        hwid_row.addWidget(hwid_label)
-        self.hwid_value_label = QLabel("загрузка...")
-        self.hwid_value_label.setObjectName("LauncherHwidValue")
-        self.hwid_value_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        hwid_row.addWidget(self.hwid_value_label, 1)
-        card_layout.addLayout(hwid_row)
-
-        card_layout.addStretch(1)
-        layout.addWidget(card)
-        layout.addStretch(1)
-        return page
-
     def _bind_signals(self) -> None:
         self._nav_group.idClicked.connect(self._switch_page)
         self.check_button.clicked.connect(lambda: self.start_update_flow(auto_install=True))
@@ -587,7 +492,6 @@ class LauncherWindow(QMainWindow):
         self.launch_app_button.clicked.connect(self._launch_main_app)
         self.save_settings_button.clicked.connect(self._save_launcher_settings)
         self.open_data_folder_button.clicked.connect(self._open_data_folder)
-        self.activate_button.clicked.connect(self._activate_license)
 
     def _make_nav_button(self, title: str) -> QPushButton:
         button = QPushButton(title)
@@ -648,19 +552,11 @@ class LauncherWindow(QMainWindow):
         self.repo_edit.setText(self._settings.github_repo)
         self.asset_pattern_edit.setText(self._settings.release_asset_pattern)
         self.auto_update_checkbox.setChecked(self._settings.auto_update_enabled)
-        self.license_url_edit.setText(self._settings.license_server_url)
-        if self._settings.license_key:
-            self.license_key_edit.setText(self._settings.license_key)
-        # Load HWID async (WMI can be slow)
-        QTimer.singleShot(200, self._load_hwid)
-        # Check license on startup
-        QTimer.singleShot(300, self._check_license_on_startup)
 
     def _save_launcher_settings(self) -> None:
         self._settings.github_repo = self.repo_edit.text().strip() or self._settings.github_repo
         self._settings.release_asset_pattern = self.asset_pattern_edit.text().strip() or self._settings.release_asset_pattern
         self._settings.auto_update_enabled = bool(self.auto_update_checkbox.isChecked())
-        self._settings.license_server_url = self.license_url_edit.text().strip() or self._settings.license_server_url
         self._store.save_settings(self._settings)
         self._append_log("Launcher settings saved.")
         self.status_tip.setText("Состояние: настройки сохранены.")
@@ -755,47 +651,6 @@ class LauncherWindow(QMainWindow):
                 QTimer.singleShot(800, self.close)
             elif event == "worker_done":
                 self.check_button.setEnabled(True)
-            elif event == "license_ok":
-                expires_at = str(payload)
-                self._settings.license_status = "active"
-                self._settings.license_expires_at = expires_at
-                self._store.save_settings(self._settings)
-                self._license_verified = True
-                self._set_license_state("active")
-                self._append_log("License validated successfully.")
-                # Start auto-update now that license is verified
-                if self._settings.auto_update_enabled:
-                    QTimer.singleShot(200, lambda: self.start_update_flow(auto_install=True))
-            elif event == "license_fail":
-                self._set_license_state("inactive", str(payload))
-                self._append_log(f"License check failed: {payload}")
-            elif event == "activation_ok":
-                token, expires_at, key, hwid_resets = payload
-                self._settings.license_token = token
-                self._settings.license_key = key
-                self._settings.license_expires_at = expires_at
-                self._settings.license_status = "active"
-                self._store.save_settings(self._settings)
-                from lolilend.ai_security import WindowsCredentialStore
-                WindowsCredentialStore("LoliLend.License.Token").write(token)
-                self._license_verified = True
-                self._set_license_state("active")
-                self.activate_button.setEnabled(True)
-                self.license_spinner.stop()
-                self.license_spinner.setVisible(False)
-                msg = "Лицензия успешно активирована!"
-                if hwid_resets > 0:
-                    msg += f" (HWID сброс #{hwid_resets})"
-                self.license_result_label.setText(msg)
-                self.license_result_label.setStyleSheet("color: #56ff98;")
-                self._append_log(f"License activated: {key[:12]}...")
-            elif event == "activation_fail":
-                self.activate_button.setEnabled(True)
-                self.license_spinner.stop()
-                self.license_spinner.setVisible(False)
-                self.license_result_label.setText(str(payload))
-                self.license_result_label.setStyleSheet("color: #ff5a5a;")
-                self._append_log(f"Activation failed: {payload}")
 
     def _set_update_state(self, state: UpdateState | str, message: str) -> None:
         state_name = state.value if isinstance(state, UpdateState) else str(state)
@@ -881,114 +736,9 @@ class LauncherWindow(QMainWindow):
         else:
             QMessageBox.information(self, APP_NAME, f"Data folder: {target}")
 
-    # ------------------------------------------------------------------
-    # License management
-    # ------------------------------------------------------------------
-
-    def _load_hwid(self) -> None:
-        try:
-            hwid = get_hwid()
-            self.hwid_value_label.setText(hwid)
-        except Exception as exc:
-            self.hwid_value_label.setText(f"Ошибка: {exc}")
-
-    def _check_license_on_startup(self) -> None:
-        """Check license validity on launcher start. Block Play if invalid."""
-        token = self._settings.license_token
-        if not token:
-            self._set_license_state("inactive", "Лицензия не активирована")
-            return
-
-        # Try to validate with server
-        def _worker() -> None:
-            try:
-                hwid = get_hwid()
-                client = LicenseClient(self._settings.license_server_url)
-                result = client.validate(token, hwid)
-                if result.valid:
-                    self._events.put(("license_ok", result.expires_at))
-                else:
-                    self._events.put(("license_fail", result.message or "Лицензия недействительна"))
-            except LicenseError as exc:
-                self._events.put(("license_fail", str(exc)))
-            except Exception as exc:
-                # Server unreachable — check cached status
-                if self._settings.license_status == "active" and self._settings.license_expires_at:
-                    self._events.put(("license_ok", self._settings.license_expires_at))
-                else:
-                    self._events.put(("license_fail", f"Сервер недоступен: {exc}"))
-
-        self._executor.submit(_worker)
-
-    def _activate_license(self) -> None:
-        """Handle Activate button click."""
-        key = self.license_key_edit.text().strip()
-        if not key:
-            self.license_result_label.setText("Введите ключ активации")
-            self.license_result_label.setStyleSheet("color: #ff5a5a;")
-            return
-
-        self.activate_button.setEnabled(False)
-        self.license_spinner.setVisible(True)
-        self.license_spinner.start()
-        self.license_result_label.setText("")
-
-        def _worker() -> None:
-            try:
-                hwid = get_hwid()
-                client = LicenseClient(self._settings.license_server_url)
-                result = client.activate(key, hwid)
-                if result.success:
-                    self._events.put(("activation_ok", (result.token, result.expires_at, key, result.hwid_resets)))
-                else:
-                    self._events.put(("activation_fail", result.message or "Ошибка активации"))
-            except LicenseError as exc:
-                self._events.put(("activation_fail", str(exc)))
-            except Exception as exc:
-                self._events.put(("activation_fail", f"Ошибка: {exc}"))
-
-        self._executor.submit(_worker)
-
-    def _start_update_if_licensed(self) -> None:
-        """Only start update check if license is valid."""
-        if self._license_verified:
-            self.start_update_flow(auto_install=True)
-
-    def _set_license_state(self, state: str, message: str = "") -> None:
-        """Update license UI state."""
-        if state == "active":
-            self.license_status_chip.setText("АКТИВНА")
-            self.license_status_chip.setStyleSheet(
-                "background: rgba(0,0,0,0.32); border: 1px solid #56ff98; color: #56ff98;"
-            )
-            self.launch_app_button.setEnabled(True)
-            expires = self._settings.license_expires_at
-            if expires:
-                self.license_info_label.setText(
-                    f"Лицензия активна. Истекает: {expires[:10]}"
-                )
-            else:
-                self.license_info_label.setText("Бессрочная лицензия")
-            self.license_info_label.setStyleSheet("color: #56ff98;")
-        elif state == "expired":
-            self.license_status_chip.setText("ИСТЕКЛА")
-            self.license_status_chip.setStyleSheet(
-                "background: rgba(0,0,0,0.32); border: 1px solid #f5bd54; color: #f5bd54;"
-            )
-            self.launch_app_button.setEnabled(False)
-            self.license_info_label.setText(message or "Лицензия истекла. Введите новый ключ.")
-            self.license_info_label.setStyleSheet("color: #f5bd54;")
-        else:  # inactive
-            self.license_status_chip.setText("НЕ АКТИВИРОВАНА")
-            self.license_status_chip.setStyleSheet(
-                "background: rgba(0,0,0,0.32); border: 1px solid #ff5a5a; color: #ff5a5a;"
-            )
-            self.launch_app_button.setEnabled(False)
-            self.license_info_label.setText(message or "Введите ключ для активации")
-            self.license_info_label.setStyleSheet("color: #ff5a5a;")
-
     def _launch_main_app(self) -> None:
         command = self._app_launch_command()
+        self._append_log(f"Launch command: {command}")
         try:
             subprocess.Popen(command, close_fds=True, env=self._child_process_env())
         except OSError as exc:
@@ -997,9 +747,26 @@ class LauncherWindow(QMainWindow):
         self._append_log("Main application launched.")
         self.close()
 
-    def _app_launch_command(self) -> list[str]:
+    @staticmethod
+    def _is_compiled() -> bool:
+        """True when running as PyInstaller or Nuitka compiled binary."""
         if getattr(sys, "frozen", False):
-            return [str(Path(sys.executable).resolve()), APP_MODE_FLAG]
+            return True  # PyInstaller
+        # Nuitka: sys.argv[0] is the real exe, check if it's not a .py script
+        argv0 = sys.argv[0] if sys.argv else ""
+        return not argv0.endswith(".py") and not argv0.endswith(".pyc")
+
+    @staticmethod
+    def _compiled_exe_path() -> Path:
+        """Return path to the compiled exe (works for both PyInstaller and Nuitka)."""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve()
+        # Nuitka: sys.argv[0] is the real exe path
+        return Path(sys.argv[0]).resolve()
+
+    def _app_launch_command(self) -> list[str]:
+        if self._is_compiled():
+            return [str(self._compiled_exe_path()), APP_MODE_FLAG]
         script = Path(sys.argv[0]).resolve()
         return [str(Path(sys.executable).resolve()), str(script), APP_MODE_FLAG]
 
@@ -1010,9 +777,8 @@ class LauncherWindow(QMainWindow):
         return env
 
     def _launcher_relaunch_command(self) -> str:
-        if getattr(sys, "frozen", False):
-            executable = Path(sys.executable).resolve()
-            return f"\"{executable}\""
+        if self._is_compiled():
+            return f"\"{self._compiled_exe_path()}\""
         script = Path(sys.argv[0]).resolve()
         python = Path(sys.executable).resolve()
         return f"\"{python}\" \"{script}\""
@@ -1164,76 +930,5 @@ QLabel#LauncherStepLabel {
 QLabel#LauncherStepSep {
     color: #442233;
     font-size: 11px;
-}
-QFrame#LauncherLicenseCard {
-    background: rgba(8, 10, 16, 0.78);
-    border: 1px solid rgba(255, 59, 134, 0.5);
-}
-QLabel#LauncherLicenseTitle {
-    font-size: 22px;
-    font-weight: 700;
-    color: #ffe1ee;
-}
-QLabel#LauncherLicenseStatusChip {
-    min-height: 28px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    font-size: 13px;
-}
-QLabel#LauncherLicenseInfo {
-    font-size: 14px;
-    color: #dcb4c7;
-}
-QLabel#LauncherLicenseKeyLabel {
-    color: #dcb4c7;
-    font-size: 13px;
-}
-QLineEdit#LauncherLicenseKeyEdit,
-QLineEdit#LauncherLicenseUrlEdit {
-    min-height: 36px;
-    padding: 0 10px;
-    border: 1px solid rgba(255, 70, 146, 0.55);
-    background: rgba(7, 8, 12, 0.75);
-    font-size: 15px;
-    letter-spacing: 1px;
-}
-QLineEdit#LauncherLicenseKeyEdit:focus,
-QLineEdit#LauncherLicenseUrlEdit:focus {
-    border: 1px solid #ff6ca9;
-}
-QPushButton#LauncherActivateButton {
-    min-height: 38px;
-    min-width: 150px;
-    background: rgba(255, 40, 118, 0.18);
-    border: 1px solid #ff4f92;
-    color: #ffe7f1;
-    font-size: 14px;
-    font-weight: 700;
-    padding: 0 16px;
-}
-QPushButton#LauncherActivateButton:hover {
-    background: rgba(255, 40, 118, 0.32);
-}
-QPushButton#LauncherActivateButton:disabled {
-    background: rgba(60, 20, 40, 0.3);
-    border: 1px solid rgba(255, 70, 146, 0.25);
-    color: rgba(255, 231, 241, 0.4);
-}
-QLabel#LauncherLicenseResult {
-    font-size: 13px;
-}
-QLabel#LauncherHwidLabel {
-    color: #cc9cb6;
-    font-size: 12px;
-}
-QLabel#LauncherHwidValue {
-    color: #ff9dc6;
-    font-size: 12px;
-    font-family: "Consolas", "Courier New", monospace;
-}
-QPushButton#LauncherPlayButton:disabled {
-    background: rgba(60, 20, 40, 0.15);
-    border: 1px solid rgba(255, 70, 146, 0.2);
-    color: rgba(255, 231, 241, 0.35);
 }
 """
