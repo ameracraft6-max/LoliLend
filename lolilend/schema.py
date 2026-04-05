@@ -375,8 +375,6 @@ tabs_schema: list[TabSpec] = [
     TabSpec(id="system_cleaner", title="\u041e\u0447\u0438\u0441\u0442\u043a\u0430", icon="system_cleaner", sections=[]),
     TabSpec(id="disk_health", title="\u0414\u0438\u0441\u043a\u0438", icon="disk_health", sections=[]),
     TabSpec(id="ram_booster", title="RAM Booster", icon="ram_booster", sections=[]),
-    TabSpec(id="sound_manager", title="\u0417\u0432\u0443\u043a", icon="sound_manager", sections=[]),
-    TabSpec(id="mic_manager", title="\u041c\u0438\u043a\u0440\u043e\u0444\u043e\u043d", icon="mic_manager", sections=[]),
 ]
 
 
