@@ -224,50 +224,42 @@ class AudioManagerService:
             return []
         mics: list[MicDevice] = []
         try:
-            enumerator = comtypes.CoCreateInstance(
-                comtypes.GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}"),
-                None, CLSCTX_ALL,
-                comtypes.GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}"),
-            )
-            # Get default capture device ID
+            # Get default mic ID
             default_id = ""
             try:
-                default_dev = enumerator.GetDefaultAudioEndpoint(1, 0)  # eCapture, eConsole
-                prop_store = default_dev.OpenPropertyStore(0)
-                default_id = self._get_device_id_raw(default_dev)
+                default_dev = AudioUtilities.GetMicrophone()
+                if default_dev:
+                    default_id = default_dev.GetId()
             except Exception:
                 pass
 
-            # Enumerate capture devices (eCapture=1, DEVICE_STATE_ACTIVE=1)
-            collection = enumerator.EnumAudioEndpoints(1, 1)
-            count = collection.GetCount()
-
-            for i in range(count):
-                try:
-                    device = collection.Item(i)
-                    dev_id = self._get_device_id_raw(device)
-                    name = self._get_device_name(device)
-
-                    # Get volume
-                    vol_iface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                    vol_ctrl = vol_iface.QueryInterface(IAudioEndpointVolume)
-                    volume = round(vol_ctrl.GetMasterVolumeLevelScalar(), 2)
-                    is_muted = bool(vol_ctrl.GetMute())
-
-                    # Get peak level
-                    peak = self._get_device_peak(device)
-
-                    mics.append(MicDevice(
-                        device_id=dev_id,
-                        name=name,
-                        volume=volume,
-                        is_muted=is_muted,
-                        is_default=(dev_id == default_id),
-                        peak_level=peak,
-                    ))
-                except Exception as exc:
-                    _log.debug("Mic enumeration error at index %d: %s", i, exc)
+            # Enumerate all devices, filter capture + active
+            all_devices = AudioUtilities.GetAllDevices()
+            for d in all_devices:
+                if not d.id or ".0.1." not in d.id:
+                    continue  # not a capture device
+                if str(d.state) != "AudioDeviceState.Active":
                     continue
+
+                try:
+                    vol = d.EndpointVolume
+                    volume = round(vol.GetMasterVolumeLevelScalar(), 2) if vol else 0.0
+                    is_muted = bool(vol.GetMute()) if vol else False
+                except Exception:
+                    volume = 0.0
+                    is_muted = False
+
+                # Peak level
+                peak = self._get_device_peak_by_id(d.id)
+
+                mics.append(MicDevice(
+                    device_id=d.id,
+                    name=d.FriendlyName or "Unknown",
+                    volume=volume,
+                    is_muted=is_muted,
+                    is_default=(d.id == default_id),
+                    peak_level=peak,
+                ))
         except Exception as exc:
             _log.debug("Microphone enumeration failed: %s", exc)
         return mics
@@ -277,101 +269,65 @@ class AudioManagerService:
         if device is None:
             return False
         try:
-            iface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            ctrl = iface.QueryInterface(IAudioEndpointVolume)
-            ctrl.SetMasterVolumeLevelScalar(max(0.0, min(1.0, volume)), None)
-            return True
+            vol = device.EndpointVolume
+            if vol:
+                vol.SetMasterVolumeLevelScalar(max(0.0, min(1.0, volume)), None)
+                return True
         except Exception as exc:
             _log.debug("Set mic volume failed: %s", exc)
-            return False
+        return False
 
     def set_mic_mute(self, device_id: str, muted: bool) -> bool:
         device = self._find_capture_device(device_id)
         if device is None:
             return False
         try:
-            iface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            ctrl = iface.QueryInterface(IAudioEndpointVolume)
-            ctrl.SetMute(int(muted), None)
-            return True
+            vol = device.EndpointVolume
+            if vol:
+                vol.SetMute(int(muted), None)
+                return True
         except Exception as exc:
             _log.debug("Set mic mute failed: %s", exc)
-            return False
+        return False
 
     def get_mic_peak(self, device_id: str) -> float:
         """Get real-time input peak level (0.0-1.0)."""
-        device = self._find_capture_device(device_id)
-        if device is None:
-            return 0.0
-        return self._get_device_peak(device)
+        return self._get_device_peak_by_id(device_id)
 
     # ------------------------------------------------------------------
-    # Internal helpers for device access
+    # Internal helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_device_peak(device) -> float:
-        """Get peak meter value from a device."""
+    def _get_device_peak_by_id(device_id: str) -> float:
+        """Get peak meter value from a capture device by ID."""
         try:
-            meter_iface = device.Activate(
-                comtypes.GUID(_IID_IAudioMeterInformation), CLSCTX_ALL, None
-            )
-            # IAudioMeterInformation::GetPeakValue is at vtable index 3
-            import ctypes
-            get_peak = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.POINTER(ctypes.c_float))(3, "GetPeakValue")
-            peak = ctypes.c_float()
-            get_peak(meter_iface, ctypes.byref(peak))
-            return round(max(0.0, min(1.0, peak.value)), 3)
-        except Exception:
-            return 0.0
-
-    @staticmethod
-    def _get_device_id_raw(device) -> str:
-        try:
-            return device.GetId()
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _get_device_name(device) -> str:
-        """Get friendly device name from property store."""
-        try:
-            prop_store = device.OpenPropertyStore(0)
-            # PKEY_Device_FriendlyName = {A45C254E-DF1C-4EFD-8020-67D146A850E0}, 14
-            from comtypes import GUID as _GUID
-            import ctypes
-
-            class _PROPERTYKEY(ctypes.Structure):
-                _fields_ = [("fmtid", comtypes.GUID), ("pid", ctypes.c_ulong)]
-
-            pkey = _PROPERTYKEY()
-            pkey.fmtid = _GUID("{A45C254E-DF1C-4EFD-8020-67D146A850E0}")
-            pkey.pid = 14
-
-            prop = prop_store.GetValue(ctypes.byref(pkey))
-            name = str(prop)
-            # Clean up PROPVARIANT string
-            if name and name != "None":
-                return name
+            mic = AudioUtilities.GetMicrophone()
+            if mic and mic.GetId() == device_id:
+                iface = mic.Activate(
+                    comtypes.GUID(_IID_IAudioMeterInformation), CLSCTX_ALL, None
+                )
+                import ctypes
+                peak = ctypes.c_float()
+                # IAudioMeterInformation vtable: QueryInterface, AddRef, Release, GetPeakValue
+                get_peak_fn = ctypes.WINFUNCTYPE(
+                    ctypes.HRESULT, ctypes.POINTER(ctypes.c_float)
+                )(3, "GetPeakValue")
+                get_peak_fn(iface, ctypes.byref(peak))
+                return round(max(0.0, min(1.0, peak.value)), 3)
         except Exception:
             pass
-        return "Unknown Device"
+        return 0.0
 
-    def _find_capture_device(self, device_id: str):
-        """Find a capture device by ID."""
+    @staticmethod
+    def _find_capture_device(device_id: str):
+        """Find a pycaw AudioDevice by capture device ID."""
         if not _PYCAW_AVAILABLE:
             return None
         try:
-            enumerator = comtypes.CoCreateInstance(
-                comtypes.GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}"),
-                None, CLSCTX_ALL,
-                comtypes.GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}"),
-            )
-            collection = enumerator.EnumAudioEndpoints(1, 1)  # eCapture, active
-            for i in range(collection.GetCount()):
-                device = collection.Item(i)
-                if self._get_device_id_raw(device) == device_id:
-                    return device
+            for d in AudioUtilities.GetAllDevices():
+                if d.id == device_id:
+                    return d
         except Exception:
             pass
         return None
