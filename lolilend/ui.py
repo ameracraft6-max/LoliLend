@@ -1892,6 +1892,219 @@ class SoundManagerTabPage(QWidget):
         self._preset_result.setText(f"Пресет '{name}' удалён")
 
 
+class MicManagerTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = AudioManagerService()
+        self._current_device_id = ""
+        self._testing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        if not self._service.available():
+            root.addWidget(QLabel("Для работы нужен пакет pycaw: pip install pycaw"))
+            root.addStretch(1)
+            return
+
+        # --- Main mic panel ---
+        mic_box = RefPanelBox("Микрофон")
+        mic_layout = QVBoxLayout(mic_box)
+        mic_layout.setContentsMargins(12, 16, 12, 10)
+        mic_layout.setSpacing(8)
+
+        # Device selector
+        dev_row = QHBoxLayout()
+        dev_row.setSpacing(8)
+        dev_row.addWidget(QLabel("Устройство:"))
+        self._mic_combo = QComboBox()
+        self._mic_combo.currentIndexChanged.connect(self._on_device_changed)
+        dev_row.addWidget(self._mic_combo, 1)
+        mic_layout.addLayout(dev_row)
+
+        # Volume slider
+        vol_row = QHBoxLayout()
+        vol_row.setSpacing(8)
+        vol_row.addWidget(QLabel("Громкость:"))
+        self._vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.valueChanged.connect(self._on_volume_changed)
+        vol_row.addWidget(self._vol_slider, 1)
+        self._vol_label = QLabel("0%")
+        self._vol_label.setMinimumWidth(40)
+        vol_row.addWidget(self._vol_label)
+        mic_layout.addLayout(vol_row)
+
+        # Mute button
+        mute_row = QHBoxLayout()
+        mute_row.setSpacing(8)
+        self._mute_btn = QPushButton("Mute")
+        self._mute_btn.setCheckable(True)
+        self._mute_btn.clicked.connect(self._on_mute_toggled)
+        mute_row.addWidget(self._mute_btn)
+        self._mute_status = QLabel("")
+        mute_row.addWidget(self._mute_status)
+        mute_row.addStretch(1)
+        mic_layout.addLayout(mute_row)
+
+        # Level meter
+        mic_layout.addWidget(RefSectionHeader("Уровень сигнала"))
+        self._level_bar = QProgressBar()
+        self._level_bar.setRange(0, 100)
+        self._level_bar.setValue(0)
+        self._level_bar.setTextVisible(True)
+        self._level_bar.setFormat("%v%")
+        mic_layout.addWidget(self._level_bar)
+
+        root.addWidget(mic_box)
+
+        # --- Boost panel ---
+        boost_box = RefPanelBox("Усиление")
+        boost_layout = QVBoxLayout(boost_box)
+        boost_layout.setContentsMargins(12, 16, 12, 10)
+        boost_layout.setSpacing(8)
+
+        boost_row = QHBoxLayout()
+        boost_row.setSpacing(8)
+        boost_row.addWidget(QLabel("Boost:"))
+        self._boost_combo = QComboBox()
+        self._boost_combo.addItems(["Нет", "+10 dB", "+20 dB", "+30 dB"])
+        boost_row.addWidget(self._boost_combo)
+        boost_row.addStretch(1)
+        boost_layout.addLayout(boost_row)
+
+        boost_note = QLabel("Boost увеличивает чувствительность микрофона.\n"
+                           "Используйте если вас плохо слышно.")
+        boost_note.setStyleSheet("color: #999; font-size: 11px;")
+        boost_note.setWordWrap(True)
+        boost_layout.addWidget(boost_note)
+
+        root.addWidget(boost_box)
+
+        # --- Test panel ---
+        test_box = RefPanelBox("Тест микрофона")
+        test_layout = QVBoxLayout(test_box)
+        test_layout.setContentsMargins(12, 16, 12, 10)
+        test_layout.setSpacing(8)
+
+        self._test_btn = QPushButton("Начать тест")
+        self._test_btn.clicked.connect(self._toggle_test)
+        test_layout.addWidget(self._test_btn)
+
+        self._test_bar = QProgressBar()
+        self._test_bar.setRange(0, 100)
+        self._test_bar.setValue(0)
+        self._test_bar.setTextVisible(True)
+        self._test_bar.setFormat("%v%")
+        self._test_bar.setStyleSheet(
+            "QProgressBar::chunk { background: qlineargradient("
+            "x1:0, y1:0, x2:1, y2:0, stop:0 #56ff98, stop:0.7 #f5bd54, stop:1 #ff5a5a); }"
+        )
+        test_layout.addWidget(self._test_bar)
+
+        self._test_status = QLabel("Нажмите 'Начать тест' и говорите в микрофон")
+        self._test_status.setStyleSheet("color: #999;")
+        test_layout.addWidget(self._test_status)
+
+        root.addWidget(test_box)
+        root.addStretch(1)
+
+        # Timers
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(1000)
+        self._refresh_timer.timeout.connect(self._refresh_status)
+
+        self._peak_timer = QTimer(self)
+        self._peak_timer.setInterval(50)
+        self._peak_timer.timeout.connect(self._update_peak)
+
+    def on_shown(self) -> None:
+        if not self._service.available():
+            return
+        self._refresh_devices()
+        self._refresh_status()
+        self._refresh_timer.start()
+
+    def on_hidden(self) -> None:
+        self._refresh_timer.stop()
+        self._peak_timer.stop()
+        self._testing = False
+
+    def _refresh_devices(self) -> None:
+        self._mic_combo.blockSignals(True)
+        self._mic_combo.clear()
+        mics = self._service.get_microphones()
+        default_idx = 0
+        for i, mic in enumerate(mics):
+            label = f"{'* ' if mic.is_default else ''}{mic.name}"
+            self._mic_combo.addItem(label, mic.device_id)
+            if mic.is_default:
+                default_idx = i
+        if mics:
+            self._mic_combo.setCurrentIndex(default_idx)
+            self._current_device_id = mics[default_idx].device_id
+        self._mic_combo.blockSignals(False)
+        self._on_status(f"Найдено микрофонов: {len(mics)}")
+
+    def _on_device_changed(self, index: int) -> None:
+        device_id = self._mic_combo.itemData(index)
+        if device_id:
+            self._current_device_id = device_id
+            self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        if not self._current_device_id:
+            return
+        mics = self._service.get_microphones()
+        for mic in mics:
+            if mic.device_id == self._current_device_id:
+                self._vol_slider.blockSignals(True)
+                self._vol_slider.setValue(int(mic.volume * 100))
+                self._vol_slider.blockSignals(False)
+                self._vol_label.setText(f"{int(mic.volume * 100)}%")
+                self._mute_btn.setChecked(mic.is_muted)
+                self._mute_btn.setText("Unmute" if mic.is_muted else "Mute")
+                self._mute_status.setText("Микрофон выключен" if mic.is_muted else "")
+                self._level_bar.setValue(int(mic.peak_level * 100))
+                break
+
+    def _on_volume_changed(self, value: int) -> None:
+        if self._current_device_id:
+            self._service.set_mic_volume(self._current_device_id, value / 100.0)
+            self._vol_label.setText(f"{value}%")
+
+    def _on_mute_toggled(self) -> None:
+        if self._current_device_id:
+            muted = self._mute_btn.isChecked()
+            self._service.set_mic_mute(self._current_device_id, muted)
+            self._mute_btn.setText("Unmute" if muted else "Mute")
+            self._mute_status.setText("Микрофон выключен" if muted else "")
+
+    def _toggle_test(self) -> None:
+        self._testing = not self._testing
+        if self._testing:
+            self._test_btn.setText("Остановить тест")
+            self._test_status.setText("Говорите в микрофон...")
+            self._test_status.setStyleSheet("color: #56ff98;")
+            self._peak_timer.start()
+        else:
+            self._test_btn.setText("Начать тест")
+            self._test_status.setText("Тест остановлен")
+            self._test_status.setStyleSheet("color: #999;")
+            self._peak_timer.stop()
+            self._test_bar.setValue(0)
+
+    def _update_peak(self) -> None:
+        if not self._current_device_id:
+            return
+        peak = self._service.get_mic_peak(self._current_device_id)
+        level = int(peak * 100)
+        self._test_bar.setValue(level)
+        self._level_bar.setValue(level)
+
+
 class SystemCleanerTabPage(QWidget):
     def __init__(self, on_status: Callable[[str], None]) -> None:
         super().__init__()
@@ -6266,6 +6479,9 @@ def build_ui(
             lifecycle_pages[index] = page
         elif tab.id == "sound_manager":
             page = SoundManagerTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
+        elif tab.id == "mic_manager":
+            page = MicManagerTabPage(lambda message: emit_status(message, False))
             lifecycle_pages[index] = page
         elif tab.id == "system_cleaner":
             page = SystemCleanerTabPage(lambda message: emit_status(message, False))
