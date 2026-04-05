@@ -98,6 +98,7 @@ class GeneralSettings:
     netspeed_overlay_position: str = "bottom_right"
     netspeed_overlay_opacity: int = 88
     clipboard_history_size: int = 50
+    launcher_design: str = "v1"
 
 
 VALID_CROSSHAIR_STYLES: frozenset[str] = frozenset({
@@ -350,6 +351,9 @@ class GeneralSettingsStore:
             settings.netspeed_overlay_position = "bottom_right"
         settings.netspeed_overlay_opacity = self._clamp_int(settings_raw.get("netspeed_overlay_opacity", settings.netspeed_overlay_opacity), 35, 100)
         settings.clipboard_history_size = self._clamp_int(settings_raw.get("clipboard_history_size", settings.clipboard_history_size), 10, 200)
+        settings.launcher_design = str(settings_raw.get("launcher_design", settings.launcher_design))
+        if settings.launcher_design not in ("v1", "v1.3AL"):
+            settings.launcher_design = "v1"
         return settings
 
     def save_settings(self, settings: GeneralSettings) -> None:

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -51,6 +52,167 @@ from lolilend.version import APP_EXE_NAME, APP_NAME, APP_VERSION
 _FONT_PATH = asset_path("fonts", "Rajdhani-Medium.ttf")
 _DEFAULT_PREVIEW_PATH = asset_path("launcher_default.png")
 _DEFAULT_PREVIEW_FALLBACK_PATH = asset_path("background_ref.png")
+_ANIME_BACKGROUND_PATH = asset_path("launcher_anime.png")
+
+LAUNCHER_DESIGNS = ["v1", "v1.3AL"]
+
+_ANIME_STYLESHEET = """
+QWidget {
+    color: #f0e6f6;
+    font-family: "Rajdhani Medium", "Bahnschrift", "Segoe UI";
+    font-size: 13px;
+    background: transparent;
+}
+QFrame#LauncherShell {
+    background: rgba(26, 22, 37, 210);
+    border: 1px solid rgba(255, 183, 197, 0.5);
+}
+QFrame#LauncherTopBar {
+    background: rgba(20, 16, 32, 220);
+    border-bottom: 1px solid rgba(255, 183, 197, 0.3);
+}
+QLabel#LauncherLogoMark {
+    border: 1px solid #FFB7C5;
+    color: #FFD1DC;
+    background: rgba(255, 183, 197, 0.15);
+    font-size: 20px;
+    font-weight: 700;
+}
+QLabel#LauncherTitle {
+    font-size: 22px;
+    font-weight: 700;
+    color: #f0e6f6;
+}
+QLabel#LauncherSubtitle {
+    font-size: 12px;
+    color: #c4b0d6;
+}
+QPushButton#LauncherNavButton {
+    min-height: 34px;
+    min-width: 110px;
+    background: rgba(30, 20, 45, 0.7);
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    color: #f0e6f6;
+    padding: 0 14px;
+}
+QPushButton#LauncherNavButton:hover {
+    border: 1px solid #FFB7C5;
+    background: rgba(255, 183, 197, 0.12);
+}
+QPushButton#LauncherNavButton:checked {
+    border: 1px solid #FFB7C5;
+    background: rgba(255, 183, 197, 0.22);
+}
+QPushButton#LauncherPlayButton {
+    min-height: 38px;
+    min-width: 170px;
+    background: rgba(255, 183, 197, 0.12);
+    border: 1px solid #FFB7C5;
+    color: #f0e6f6;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 0 16px;
+}
+QPushButton#LauncherPlayButton:hover {
+    background: rgba(255, 183, 197, 0.25);
+}
+QFrame#LauncherHeroCard,
+QFrame#LauncherImageCard,
+QFrame#LauncherSettingsCard {
+    background: rgba(30, 20, 45, 0.75);
+    border: 1px solid rgba(255, 183, 197, 0.4);
+}
+QLabel#LauncherStateChip {
+    min-height: 28px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QLabel#LauncherHeroTitle {
+    font-size: 24px;
+    font-weight: 700;
+    color: #f0e6f6;
+}
+QLabel#LauncherMetaLabel {
+    color: #c4b0d6;
+    font-size: 13px;
+}
+QLabel#LauncherStatusLabel {
+    color: #e8d5f0;
+    font-size: 14px;
+}
+QProgressBar#LauncherProgress {
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    background: rgba(20, 15, 35, 0.8);
+    text-align: center;
+}
+QProgressBar#LauncherProgress::chunk {
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0, stop: 0 #FFB7C5, stop: 1 #B4A7D6);
+}
+QPushButton#LauncherCheckButton,
+QPushButton#LauncherRetryButton,
+QPushButton#LauncherSaveSettingsButton,
+QPushButton#LauncherOpenDataButton {
+    min-height: 34px;
+    background: rgba(255, 183, 197, 0.06);
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    color: #f0e6f6;
+    padding: 0 14px;
+}
+QPushButton#LauncherCheckButton:hover,
+QPushButton#LauncherRetryButton:hover,
+QPushButton#LauncherSaveSettingsButton:hover,
+QPushButton#LauncherOpenDataButton:hover {
+    background: rgba(255, 183, 197, 0.18);
+}
+QLabel#LauncherPreviewLabel {
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    background: rgba(15, 12, 30, 0.7);
+}
+QLineEdit#LauncherRepoEdit,
+QLineEdit#LauncherAssetPatternEdit {
+    min-height: 30px;
+    padding: 0 8px;
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    background: rgba(20, 15, 35, 0.7);
+}
+QLineEdit#LauncherRepoEdit:focus,
+QLineEdit#LauncherAssetPatternEdit:focus {
+    border: 1px solid #FFB7C5;
+}
+QComboBox#LauncherDesignCombo {
+    min-height: 30px;
+    padding: 0 8px;
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    background: rgba(20, 15, 35, 0.7);
+    color: #f0e6f6;
+}
+QPlainTextEdit#LauncherLogsView {
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    background: rgba(20, 15, 35, 0.7);
+    color: #e8d5f0;
+}
+QLabel#LauncherFooter {
+    color: #c4b0d6;
+    font-size: 12px;
+}
+QLabel#LauncherProgressPct {
+    color: #FFB7C5;
+    font-size: 14px;
+    font-weight: 700;
+}
+QLabel#LauncherStepLabel {
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    padding: 2px 4px;
+}
+QLabel#LauncherStepSep {
+    color: #3d2d4a;
+    font-size: 11px;
+}
+QCheckBox {
+    color: #f0e6f6;
+}
+"""
 
 
 def _install_hud_font() -> None:
@@ -69,10 +231,14 @@ def run_launcher(argv: list[str] | None = None) -> int:
 
 
 class NeonBackdrop(QFrame):
-    def __init__(self) -> None:
+    def __init__(self, design: str = "v1") -> None:
         super().__init__()
-        background_path = _DEFAULT_PREVIEW_PATH if _DEFAULT_PREVIEW_PATH.exists() else _DEFAULT_PREVIEW_FALLBACK_PATH
-        self._pixmap = QPixmap(str(background_path)) if background_path.exists() else QPixmap()
+        self._design = design
+        if design == "v1.3AL" and _ANIME_BACKGROUND_PATH.exists():
+            self._pixmap = QPixmap(str(_ANIME_BACKGROUND_PATH))
+        else:
+            bg = _DEFAULT_PREVIEW_PATH if _DEFAULT_PREVIEW_PATH.exists() else _DEFAULT_PREVIEW_FALLBACK_PATH
+            self._pixmap = QPixmap(str(bg)) if bg.exists() else QPixmap()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
@@ -87,18 +253,31 @@ class NeonBackdrop(QFrame):
             dy = (scaled.height() - rect.height()) // 2
             painter.drawPixmap(0, 0, scaled, dx, dy, rect.width(), rect.height())
 
-        overlay = QLinearGradient(0, 0, rect.width(), rect.height())
-        overlay.setColorAt(0.0, QColor(6, 8, 12, 240))
-        overlay.setColorAt(0.45, QColor(28, 4, 14, 210))
-        overlay.setColorAt(1.0, QColor(5, 6, 10, 245))
-        painter.fillRect(rect, overlay)
-
-        painter.setPen(QPen(QColor(255, 40, 110, 40), 1))
-        for y in range(0, rect.height(), 4):
-            painter.drawLine(0, y, rect.width(), y)
-
-        painter.fillRect(0, 0, rect.width(), 72, QColor(0, 0, 0, 70))
-        painter.fillRect(0, rect.height() - 92, rect.width(), 92, QColor(0, 0, 0, 95))
+        if self._design == "v1.3AL":
+            # Anime: soft purple overlay
+            overlay = QLinearGradient(0, 0, rect.width(), rect.height())
+            overlay.setColorAt(0.0, QColor(26, 22, 37, 200))
+            overlay.setColorAt(0.5, QColor(20, 15, 35, 180))
+            overlay.setColorAt(1.0, QColor(15, 12, 30, 220))
+            painter.fillRect(rect, overlay)
+            # Soft horizontal lines
+            painter.setPen(QPen(QColor(255, 183, 197, 15), 1))
+            for y in range(0, rect.height(), 6):
+                painter.drawLine(0, y, rect.width(), y)
+            painter.fillRect(0, 0, rect.width(), 72, QColor(26, 22, 37, 80))
+            painter.fillRect(0, rect.height() - 60, rect.width(), 60, QColor(15, 12, 30, 100))
+        else:
+            # v1: Neon overlay
+            overlay = QLinearGradient(0, 0, rect.width(), rect.height())
+            overlay.setColorAt(0.0, QColor(6, 8, 12, 240))
+            overlay.setColorAt(0.45, QColor(28, 4, 14, 210))
+            overlay.setColorAt(1.0, QColor(5, 6, 10, 245))
+            painter.fillRect(rect, overlay)
+            painter.setPen(QPen(QColor(255, 40, 110, 40), 1))
+            for y in range(0, rect.height(), 4):
+                painter.drawLine(0, y, rect.width(), y)
+            painter.fillRect(0, 0, rect.width(), 72, QColor(0, 0, 0, 70))
+            painter.fillRect(0, rect.height() - 92, rect.width(), 92, QColor(0, 0, 0, 95))
 
 
 class PulseSpinner(QWidget):
@@ -260,7 +439,7 @@ class LauncherWindow(QMainWindow):
         self.setMinimumSize(1140, 680)
         self.resize(1380, 820)
 
-        root = NeonBackdrop()
+        root = NeonBackdrop(self._settings.launcher_design)
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(24, 24, 24, 24)
         root_layout.setSpacing(0)
@@ -336,7 +515,7 @@ class LauncherWindow(QMainWindow):
         content_layout.addWidget(self.status_tip)
 
         self.setCentralWidget(root)
-        self.setStyleSheet(self._launcher_stylesheet())
+        self.setStyleSheet(self._launcher_stylesheet(self._settings.launcher_design))
         self.home_nav.setChecked(True)
         self.stack.setCurrentIndex(0)
 
@@ -460,6 +639,13 @@ class LauncherWindow(QMainWindow):
         self.auto_update_checkbox.setObjectName("LauncherAutoUpdateCheck")
         settings_layout.addWidget(self.auto_update_checkbox, 2, 1)
 
+        design_label = QLabel("Дизайн лаунчера")
+        settings_layout.addWidget(design_label, 3, 0)
+        self.design_combo = QComboBox()
+        self.design_combo.setObjectName("LauncherDesignCombo")
+        self.design_combo.addItems(LAUNCHER_DESIGNS)
+        settings_layout.addWidget(self.design_combo, 3, 1)
+
         actions = QHBoxLayout()
         self.save_settings_button = QPushButton("Сохранить")
         self.save_settings_button.setObjectName("LauncherSaveSettingsButton")
@@ -468,7 +654,7 @@ class LauncherWindow(QMainWindow):
         actions.addWidget(self.save_settings_button)
         actions.addWidget(self.open_data_folder_button)
         actions.addStretch(1)
-        settings_layout.addLayout(actions, 3, 1)
+        settings_layout.addLayout(actions, 4, 1)
 
         layout.addWidget(settings_card)
         layout.addStretch(1)
@@ -552,11 +738,14 @@ class LauncherWindow(QMainWindow):
         self.repo_edit.setText(self._settings.github_repo)
         self.asset_pattern_edit.setText(self._settings.release_asset_pattern)
         self.auto_update_checkbox.setChecked(self._settings.auto_update_enabled)
+        idx = LAUNCHER_DESIGNS.index(self._settings.launcher_design) if self._settings.launcher_design in LAUNCHER_DESIGNS else 0
+        self.design_combo.setCurrentIndex(idx)
 
     def _save_launcher_settings(self) -> None:
         self._settings.github_repo = self.repo_edit.text().strip() or self._settings.github_repo
         self._settings.release_asset_pattern = self.asset_pattern_edit.text().strip() or self._settings.release_asset_pattern
         self._settings.auto_update_enabled = bool(self.auto_update_checkbox.isChecked())
+        self._settings.launcher_design = self.design_combo.currentText() or "v1"
         self._store.save_settings(self._settings)
         self._append_log("Launcher settings saved.")
         self.status_tip.setText("Состояние: настройки сохранены.")
@@ -767,7 +956,9 @@ class LauncherWindow(QMainWindow):
         return f"\"{python}\" \"{script}\""
 
     @staticmethod
-    def _launcher_stylesheet() -> str:
+    def _launcher_stylesheet(design: str = "v1") -> str:
+        if design == "v1.3AL":
+            return _ANIME_STYLESHEET
         return """
 QWidget {
     color: #f3f0f6;
