@@ -53,6 +53,8 @@ from lolilend.ai_ui import AiTabPage
 from lolilend.video_to_gif import GifSettings, VideoToGifService
 from lolilend.system_cleaner import SystemCleanerService, format_size as clean_format_size
 from lolilend.disk_health import get_snapshot as get_disk_snapshot, format_size as disk_format_size
+from lolilend.ram_booster import RamBoosterService
+from lolilend.audio_manager import AudioManagerService
 from lolilend.crosshair_overlay import CrosshairConfig, CrosshairOverlayWindow, CROSSHAIR_STYLE_OPTIONS, render_crosshair
 from lolilend.analytics import AnalyticsSummary, GameAnalyticsService, LiveGameEntry, TopGameEntry, format_duration
 from lolilend.discord_quests import DiscordQuestService
@@ -1529,6 +1531,365 @@ class SecurityLinkCard(QFrame):
             self._on_status(f"{_STATUS_OPENED}: {self._item.title}")
             return
         self._on_status(f"{_STATUS_OPEN_FAILED}: {self._item.url}")
+
+
+class RamBoosterTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = RamBoosterService()
+        self._checked_pids: set[int] = set()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        box = RefPanelBox("RAM Booster")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(12, 16, 12, 10)
+        layout.setSpacing(8)
+
+        # RAM info bar
+        self._ram_label = QLabel("Загрузка...")
+        self._ram_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(self._ram_label)
+
+        self._ram_bar = QProgressBar()
+        self._ram_bar.setRange(0, 100)
+        layout.addWidget(self._ram_bar)
+
+        # Process table
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(["Процесс", "PID", "RAM (MB)", "CPU %", "Статус"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        layout.addWidget(self._table, 1)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self._select_all_btn = QPushButton("Выделить все")
+        self._select_all_btn.clicked.connect(self._toggle_select_all)
+        btn_row.addWidget(self._select_all_btn)
+        self._optimize_btn = QPushButton("Оптимизировать")
+        self._optimize_btn.clicked.connect(self._optimize)
+        btn_row.addWidget(self._optimize_btn)
+        self._refresh_btn = QPushButton("Обновить")
+        self._refresh_btn.clicked.connect(self._refresh)
+        btn_row.addWidget(self._refresh_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        self._result_label = QLabel("")
+        self._result_label.setWordWrap(True)
+        layout.addWidget(self._result_label)
+
+        root.addWidget(box)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._refresh)
+
+    def on_shown(self) -> None:
+        self._refresh()
+        self._timer.start()
+
+    def on_hidden(self) -> None:
+        self._timer.stop()
+
+    def _refresh(self) -> None:
+        ram = self._service.get_ram_info()
+        self._ram_label.setText(
+            f"Всего: {ram.total_mb / 1024:.1f} GB  |  "
+            f"Занято: {ram.used_mb / 1024:.1f} GB  |  "
+            f"Свободно: {ram.free_mb / 1024:.1f} GB"
+        )
+        self._ram_bar.setValue(int(ram.percent))
+
+        # Save checked state
+        self._checked_pids.clear()
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                pid_item = self._table.item(row, 1)
+                if pid_item:
+                    try:
+                        self._checked_pids.add(int(pid_item.text()))
+                    except ValueError:
+                        pass
+
+        entries = self._service.get_processes()
+        self._table.setRowCount(len(entries))
+        for i, e in enumerate(entries):
+            name_item = QTableWidgetItem(e.name)
+            name_item.setFlags(name_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            if e.is_protected:
+                name_item.setCheckState(Qt.CheckState.Unchecked)
+                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+                name_item.setForeground(QColor(120, 120, 120))
+            else:
+                was_checked = e.pid in self._checked_pids
+                name_item.setCheckState(Qt.CheckState.Checked if was_checked else Qt.CheckState.Unchecked)
+
+            self._table.setItem(i, 0, name_item)
+            self._table.setItem(i, 1, QTableWidgetItem(str(e.pid)))
+            self._table.setItem(i, 2, QTableWidgetItem(f"{e.ram_mb:.1f}"))
+            self._table.setItem(i, 3, QTableWidgetItem(f"{e.cpu_percent:.1f}"))
+            self._table.setItem(i, 4, QTableWidgetItem(e.status))
+
+        self._table.resizeColumnsToContents()
+
+    def _toggle_select_all(self) -> None:
+        any_checked = False
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.flags() & Qt.ItemFlag.ItemIsEnabled and item.checkState() == Qt.CheckState.Checked:
+                any_checked = True
+                break
+        new_state = Qt.CheckState.Unchecked if any_checked else Qt.CheckState.Checked
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                item.setCheckState(new_state)
+
+    def _optimize(self) -> None:
+        pids: list[int] = []
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                pid_item = self._table.item(row, 1)
+                if pid_item:
+                    try:
+                        pids.append(int(pid_item.text()))
+                    except ValueError:
+                        pass
+        if not pids:
+            self._result_label.setText("Не выбрано ни одного процесса")
+            return
+
+        self._timer.stop()
+        self._optimize_btn.setEnabled(False)
+        result = self._service.kill_processes(pids)
+        self._result_label.setText(
+            f"Освобождено: {result.freed_mb:.0f} MB  |  "
+            f"Завершено: {result.killed}  |  Ошибок: {result.failed}"
+        )
+        self._result_label.setStyleSheet("color: #56ff98;" if result.killed > 0 else "")
+        self._on_status(f"RAM Booster: освобождено {result.freed_mb:.0f} MB")
+        self._optimize_btn.setEnabled(True)
+        self._checked_pids.clear()
+        self._refresh()
+        self._timer.start()
+
+
+class SoundManagerTabPage(QWidget):
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._service = AudioManagerService()
+        self._session_rows: dict[int, tuple[QLabel, QSlider, QLabel, QPushButton]] = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        if not self._service.available():
+            root.addWidget(QLabel("Для работы нужен пакет pycaw: pip install pycaw"))
+            root.addStretch(1)
+            return
+
+        # Mixer panel
+        mixer_box = RefPanelBox("Микшер приложений")
+        mixer_layout = QVBoxLayout(mixer_box)
+        mixer_layout.setContentsMargins(12, 16, 12, 10)
+        mixer_layout.setSpacing(6)
+
+        # Master volume
+        master_row = QHBoxLayout()
+        master_row.setSpacing(8)
+        master_row.addWidget(QLabel("Мастер"))
+        self._master_slider = QSlider(Qt.Orientation.Horizontal)
+        self._master_slider.setRange(0, 100)
+        self._master_slider.valueChanged.connect(self._on_master_changed)
+        master_row.addWidget(self._master_slider, 1)
+        self._master_label = QLabel("0%")
+        self._master_label.setMinimumWidth(40)
+        master_row.addWidget(self._master_label)
+        mixer_layout.addLayout(master_row)
+
+        # Sessions container
+        self._sessions_widget = QWidget()
+        self._sessions_layout = QVBoxLayout(self._sessions_widget)
+        self._sessions_layout.setContentsMargins(0, 0, 0, 0)
+        self._sessions_layout.setSpacing(4)
+        mixer_layout.addWidget(self._sessions_widget)
+
+        root.addWidget(mixer_box)
+
+        # Presets panel
+        preset_box = RefPanelBox("Пресеты")
+        preset_layout = QVBoxLayout(preset_box)
+        preset_layout.setContentsMargins(12, 16, 12, 10)
+        preset_layout.setSpacing(8)
+
+        self._preset_combo = QComboBox()
+        preset_layout.addWidget(self._preset_combo)
+
+        preset_btns = QHBoxLayout()
+        preset_btns.setSpacing(8)
+        save_btn = QPushButton("Сохранить")
+        save_btn.clicked.connect(self._save_preset)
+        preset_btns.addWidget(save_btn)
+        load_btn = QPushButton("Загрузить")
+        load_btn.clicked.connect(self._load_preset)
+        preset_btns.addWidget(load_btn)
+        del_btn = QPushButton("Удалить")
+        del_btn.clicked.connect(self._delete_preset)
+        preset_btns.addWidget(del_btn)
+        preset_btns.addStretch(1)
+        preset_layout.addLayout(preset_btns)
+
+        self._preset_result = QLabel("")
+        preset_layout.addWidget(self._preset_result)
+
+        root.addWidget(preset_box)
+        root.addStretch(1)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(3000)
+        self._timer.timeout.connect(self._refresh_sessions)
+
+    def on_shown(self) -> None:
+        if not self._service.available():
+            return
+        self._refresh_master()
+        self._refresh_sessions()
+        self._refresh_presets()
+        self._timer.start()
+
+    def on_hidden(self) -> None:
+        self._timer.stop()
+
+    def _refresh_master(self) -> None:
+        vol = int(self._service.get_master_volume() * 100)
+        self._master_slider.blockSignals(True)
+        self._master_slider.setValue(vol)
+        self._master_slider.blockSignals(False)
+        self._master_label.setText(f"{vol}%")
+
+    def _on_master_changed(self, value: int) -> None:
+        self._service.set_master_volume(value / 100.0)
+        self._master_label.setText(f"{value}%")
+
+    def _refresh_sessions(self) -> None:
+        sessions = self._service.get_sessions()
+        active_pids = {s.pid for s in sessions}
+
+        # Remove dead sessions
+        for pid in list(self._session_rows.keys()):
+            if pid not in active_pids:
+                label, slider, val_label, mute_btn = self._session_rows.pop(pid)
+                label.deleteLater()
+                slider.deleteLater()
+                val_label.deleteLater()
+                mute_btn.deleteLater()
+                # Find and remove the row layout
+                for i in range(self._sessions_layout.count()):
+                    item = self._sessions_layout.itemAt(i)
+                    if item and item.widget():
+                        item.widget().deleteLater()
+                        self._sessions_layout.removeItem(item)
+                        break
+
+        for s in sessions:
+            if s.pid in self._session_rows:
+                # Update existing
+                label, slider, val_label, mute_btn = self._session_rows[s.pid]
+                if not slider.isSliderDown():
+                    slider.blockSignals(True)
+                    slider.setValue(int(s.volume * 100))
+                    slider.blockSignals(False)
+                    val_label.setText(f"{int(s.volume * 100)}%")
+                mute_btn.setText("🔇" if s.is_muted else "🔊")
+            else:
+                # Create new row
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(8)
+
+                label = QLabel(s.display_name)
+                label.setFixedWidth(120)
+                row_layout.addWidget(label)
+
+                slider = QSlider(Qt.Orientation.Horizontal)
+                slider.setRange(0, 100)
+                slider.setValue(int(s.volume * 100))
+                pid = s.pid
+                slider.valueChanged.connect(lambda v, p=pid: self._on_session_volume(p, v))
+                row_layout.addWidget(slider, 1)
+
+                val_label = QLabel(f"{int(s.volume * 100)}%")
+                val_label.setMinimumWidth(40)
+                row_layout.addWidget(val_label)
+
+                mute_btn = QPushButton("🔇" if s.is_muted else "🔊")
+                mute_btn.setFixedWidth(32)
+                mute_btn.clicked.connect(lambda checked, p=pid: self._toggle_mute(p))
+                row_layout.addWidget(mute_btn)
+
+                self._sessions_layout.addWidget(row_widget)
+                self._session_rows[s.pid] = (label, slider, val_label, mute_btn)
+
+    def _on_session_volume(self, pid: int, value: int) -> None:
+        self._service.set_session_volume(pid, value / 100.0)
+        if pid in self._session_rows:
+            self._session_rows[pid][2].setText(f"{value}%")
+
+    def _toggle_mute(self, pid: int) -> None:
+        sessions = self._service.get_sessions()
+        for s in sessions:
+            if s.pid == pid:
+                self._service.set_session_mute(pid, not s.is_muted)
+                if pid in self._session_rows:
+                    self._session_rows[pid][3].setText("🔇" if not s.is_muted else "🔊")
+                break
+
+    def _refresh_presets(self) -> None:
+        self._preset_combo.clear()
+        for p in self._service.get_presets():
+            self._preset_combo.addItem(p.name)
+
+    def _save_preset(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Сохранить пресет", "Название:")
+        if ok and name.strip():
+            self._service.save_current_as_preset(name.strip())
+            self._refresh_presets()
+            self._preset_result.setText(f"Пресет '{name.strip()}' сохранён")
+            self._on_status(f"Звук: пресет '{name.strip()}' сохранён")
+
+    def _load_preset(self) -> None:
+        name = self._preset_combo.currentText()
+        if not name:
+            return
+        presets = self._service.get_presets()
+        for p in presets:
+            if p.name == name:
+                applied, skipped = self._service.apply_preset(p)
+                self._preset_result.setText(f"Применено: {applied}, пропущено: {skipped}")
+                self._refresh_sessions()
+                self._on_status(f"Звук: пресет '{name}' применён")
+                break
+
+    def _delete_preset(self) -> None:
+        name = self._preset_combo.currentText()
+        if not name:
+            return
+        self._service.delete_preset(name)
+        self._refresh_presets()
+        self._preset_result.setText(f"Пресет '{name}' удалён")
 
 
 class SystemCleanerTabPage(QWidget):
@@ -5900,6 +6261,12 @@ def build_ui(
             lifecycle_pages[index] = page
         elif tab.id == "video_to_gif":
             page = VideoToGifTabPage(lambda message: emit_status(message, False))
+        elif tab.id == "ram_booster":
+            page = RamBoosterTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
+        elif tab.id == "sound_manager":
+            page = SoundManagerTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
         elif tab.id == "system_cleaner":
             page = SystemCleanerTabPage(lambda message: emit_status(message, False))
         elif tab.id == "disk_health":
