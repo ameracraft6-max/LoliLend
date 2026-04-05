@@ -13,7 +13,7 @@ from lolilend.bootstrap import APP_MODE_FLAG, configure_qt_environment, prime_qt
 
 configure_qt_environment()
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QTimer, Qt
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -54,7 +54,17 @@ _DEFAULT_PREVIEW_PATH = asset_path("launcher_default.png")
 _DEFAULT_PREVIEW_FALLBACK_PATH = asset_path("background_ref.png")
 _ANIME_BACKGROUND_PATH = asset_path("launcher_anime.png")
 
-LAUNCHER_DESIGNS = ["v1", "v1.3AL"]
+LAUNCHER_DESIGNS = ["v1", "v1.3AL", "v2.0AL"]
+
+_CHARACTERS_DIR = asset_path("characters")
+
+_ANIME_CHARACTERS = [
+    {"name": "Kuro", "file": "kuro.png", "color": "#c0392b", "dim": "#922347", "quote": "Мощь в твоих руках"},
+    {"name": "Hana", "file": "hana.png", "color": "#5b9bd5", "dim": "#2d4a6a", "quote": "Ня~ Поиграем?"},
+    {"name": "Yuki", "file": "yuki.png", "color": "#4fc3f7", "dim": "#1a5276", "quote": "Система стабильна"},
+    {"name": "Sakura", "file": "sakura.png", "color": "#e74c8b", "dim": "#8b2252", "quote": "Готова к бою!"},
+    {"name": "Rei", "file": "rei.png", "color": "#ef5350", "dim": "#8b1a1a", "quote": "Все системы онлайн"},
+]
 
 _ANIME_STYLESHEET = """
 QWidget {
@@ -385,6 +395,162 @@ class StageBar(QWidget):
         self._set_all_pending()
 
 
+class CharacterSlider(QFrame):
+    """Anime character slider with fade transitions and navigation."""
+
+    character_changed = Signal(int)  # emits index when character changes
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("CharacterSlider")
+        self._index = 0
+        self._characters = _ANIME_CHARACTERS
+        self._pixmaps: list[QPixmap] = []
+
+        # Load character images
+        for ch in self._characters:
+            path = _CHARACTERS_DIR / ch["file"]
+            pm = QPixmap(str(path)) if path.exists() else QPixmap()
+            self._pixmaps.append(pm)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Character image
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setMinimumSize(280, 350)
+        layout.addWidget(self._image_label, 1)
+
+        # Name + quote
+        self._name_label = QLabel()
+        self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_label.setStyleSheet("font-size: 18px; font-weight: 700; color: #f0e6f6;")
+        layout.addWidget(self._name_label)
+
+        self._quote_label = QLabel()
+        self._quote_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._quote_label.setStyleSheet("font-size: 12px; color: #c4b0d6; font-style: italic;")
+        layout.addWidget(self._quote_label)
+
+        # Navigation: ◀ dots ▶
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(8)
+        nav_row.addStretch(1)
+
+        self._prev_btn = QPushButton("◀")
+        self._prev_btn.setFixedSize(32, 32)
+        self._prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._prev_btn.clicked.connect(self._prev)
+        self._prev_btn.setObjectName("SliderNavBtn")
+        nav_row.addWidget(self._prev_btn)
+
+        self._dots: list[QLabel] = []
+        for i in range(len(self._characters)):
+            dot = QLabel("●" if i == 0 else "○")
+            dot.setFixedWidth(16)
+            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            dot.setStyleSheet("font-size: 10px; color: #c4b0d6;")
+            nav_row.addWidget(dot)
+            self._dots.append(dot)
+
+        self._next_btn = QPushButton("▶")
+        self._next_btn.setFixedSize(32, 32)
+        self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._next_btn.clicked.connect(self._next)
+        self._next_btn.setObjectName("SliderNavBtn")
+        nav_row.addWidget(self._next_btn)
+
+        nav_row.addStretch(1)
+        layout.addLayout(nav_row)
+
+        # Auto-scroll timer
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(8000)
+        self._auto_timer.timeout.connect(self._next)
+
+        self._show_character(0, animate=False)
+
+    def start(self) -> None:
+        self._auto_timer.start()
+
+    def stop(self) -> None:
+        self._auto_timer.stop()
+
+    def _prev(self) -> None:
+        idx = (self._index - 1) % len(self._characters)
+        self._show_character(idx)
+        self._auto_timer.start()  # reset timer
+
+    def _next(self) -> None:
+        idx = (self._index + 1) % len(self._characters)
+        self._show_character(idx)
+        self._auto_timer.start()  # reset timer
+
+    def _show_character(self, index: int, animate: bool = True) -> None:
+        self._index = index
+        ch = self._characters[index]
+
+        # Update dots
+        for i, dot in enumerate(self._dots):
+            dot.setText("●" if i == index else "○")
+            dot.setStyleSheet(
+                f"font-size: 10px; color: {ch['color']};" if i == index
+                else "font-size: 10px; color: #c4b0d6;"
+            )
+
+        # Update text
+        self._name_label.setText(ch["name"])
+        self._name_label.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {ch['color']};")
+        self._quote_label.setText(f'"{ch["quote"]}"')
+
+        if animate:
+            # Fade out → change image → fade in
+            effect = QGraphicsOpacityEffect(self._image_label)
+            self._image_label.setGraphicsEffect(effect)
+            fade_out = QPropertyAnimation(effect, b"opacity", self._image_label)
+            fade_out.setDuration(200)
+            fade_out.setStartValue(1.0)
+            fade_out.setEndValue(0.0)
+            fade_out.setEasingCurve(QEasingCurve.Type.InQuad)
+
+            def on_fade_out_done() -> None:
+                self._set_pixmap(index)
+                fade_in = QPropertyAnimation(effect, b"opacity", self._image_label)
+                fade_in.setDuration(300)
+                fade_in.setStartValue(0.0)
+                fade_in.setEndValue(1.0)
+                fade_in.setEasingCurve(QEasingCurve.Type.OutQuad)
+                fade_in.finished.connect(lambda: self._image_label.setGraphicsEffect(None))
+                fade_in.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+            fade_out.finished.connect(on_fade_out_done)
+            fade_out.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        else:
+            self._set_pixmap(index)
+
+        self.character_changed.emit(index)
+
+    def _set_pixmap(self, index: int) -> None:
+        pm = self._pixmaps[index]
+        if not pm.isNull():
+            scaled = pm.scaled(
+                self._image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._image_label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._set_pixmap(self._index)
+
+    @property
+    def current_character(self) -> dict:
+        return self._characters[self._index]
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self, *, auto_start_check: bool = True) -> None:
         super().__init__()
@@ -592,17 +758,25 @@ class LauncherWindow(QMainWindow):
         hero_layout.addLayout(controls)
         hero_layout.addStretch(1)
 
-        self.image_card = QFrame()
-        self.image_card.setObjectName("LauncherImageCard")
-        image_layout = QVBoxLayout(self.image_card)
-        image_layout.setContentsMargins(16, 16, 16, 16)
-        image_layout.setSpacing(10)
-
-        self.preview_label = QLabel()
-        self.preview_label.setObjectName("LauncherPreviewLabel")
-        self.preview_label.setMinimumSize(360, 220)
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        image_layout.addWidget(self.preview_label, 1)
+        # Right column: image card OR character slider
+        if self._settings.launcher_design == "v2.0AL":
+            self.character_slider = CharacterSlider()
+            self.character_slider.setObjectName("LauncherCharacterSlider")
+            self.character_slider.character_changed.connect(self._on_character_changed)
+            self.image_card = self.character_slider
+            self.preview_label = None
+        else:
+            self.character_slider = None
+            self.image_card = QFrame()
+            self.image_card.setObjectName("LauncherImageCard")
+            image_layout = QVBoxLayout(self.image_card)
+            image_layout.setContentsMargins(16, 16, 16, 16)
+            image_layout.setSpacing(10)
+            self.preview_label = QLabel()
+            self.preview_label.setObjectName("LauncherPreviewLabel")
+            self.preview_label.setMinimumSize(360, 220)
+            self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_layout.addWidget(self.preview_label, 1)
 
         layout.addWidget(self.hero_card, 0, 0)
         layout.addWidget(self.image_card, 0, 1)
@@ -703,9 +877,24 @@ class LauncherWindow(QMainWindow):
         animation.finished.connect(lambda: current.setGraphicsEffect(None))
         animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
+    def _on_character_changed(self, index: int) -> None:
+        """Update launcher accent color when character changes."""
+        ch = _ANIME_CHARACTERS[index]
+        color = ch["color"]
+        dim = ch["dim"]
+        # Update border colors dynamically
+        self.hero_card.setStyleSheet(
+            f"QFrame#LauncherHeroCard {{ border: 1px solid {color}; background: rgba(20, 15, 35, 0.75); }}"
+        )
+        self.state_chip.setStyleSheet(
+            f"background: rgba(0,0,0,0.32); border: 1px solid {color}; color: {color};"
+        )
+
     def _animate_home_cards(self) -> None:
         self._animate_card_entry(self.hero_card, delay_ms=0)
         self._animate_card_entry(self.image_card, delay_ms=110)
+        if self.character_slider is not None:
+            self.character_slider.start()
 
     def _animate_card_entry(self, card: QWidget, *, delay_ms: int) -> None:
         target = card.pos()
@@ -751,6 +940,8 @@ class LauncherWindow(QMainWindow):
         self.status_tip.setText("Состояние: настройки сохранены.")
 
     def _load_preview_image(self) -> None:
+        if self.preview_label is None:
+            return
         path = _DEFAULT_PREVIEW_PATH if _DEFAULT_PREVIEW_PATH.exists() else _DEFAULT_PREVIEW_FALLBACK_PATH
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
@@ -959,6 +1150,25 @@ class LauncherWindow(QMainWindow):
     def _launcher_stylesheet(design: str = "v1") -> str:
         if design == "v1.3AL":
             return _ANIME_STYLESHEET
+        if design == "v2.0AL":
+            return _ANIME_STYLESHEET + """
+QFrame#CharacterSlider, QFrame#LauncherCharacterSlider {
+    background: rgba(20, 15, 35, 0.7);
+    border: 1px solid rgba(255, 183, 197, 0.4);
+    border-radius: 12px;
+}
+QPushButton#SliderNavBtn {
+    background: rgba(255, 183, 197, 0.1);
+    border: 1px solid rgba(255, 183, 197, 0.3);
+    color: #f0e6f6;
+    border-radius: 16px;
+    font-size: 14px;
+}
+QPushButton#SliderNavBtn:hover {
+    background: rgba(255, 183, 197, 0.25);
+    border: 1px solid #FFB7C5;
+}
+"""
         return """
 QWidget {
     color: #f3f0f6;
