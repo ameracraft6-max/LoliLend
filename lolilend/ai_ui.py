@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from lolilend.ai_client import (
+    AiClientError,
     AiModelInfo,
     AiRequestOptions,
     AiTaskRequest,
@@ -941,11 +942,19 @@ class AiTabPage(QWidget):
         task_key = self._active_task_key()
         settings = self._settings_store.load_settings()
         preferred = self._selected_models_by_task.get(task_key) or settings.ai_model
-        self._filtered_models = self._catalog_service.get_models(
-            force_refresh=False,
-            task_key=task_key,
-            popular_only=self.popular_only_checkbox.isChecked(),
-        )
+        try:
+            self._filtered_models = self._catalog_service.get_models(
+                force_refresh=False,
+                task_key=task_key,
+                popular_only=self.popular_only_checkbox.isChecked(),
+            )
+        except AiClientError as exc:
+            self._filtered_models = []
+            self._on_models_error(str(exc))
+            self.model_combo.blockSignals(True)
+            self.model_combo.clear()
+            self.model_combo.blockSignals(False)
+            return
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         chosen_index = 0

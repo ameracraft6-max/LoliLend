@@ -47,6 +47,10 @@ class ThemeSpec:
     main_frame_alpha: int = 228    # QFrame#MainFrame
     sidebar_alpha: int = 245       # QFrame#SidebarFrame
     content_alpha: int = 206       # QFrame#ContentFrame
+    # Corner radius applied to buttons, inputs, and panels. 0 keeps the classic sharp look.
+    border_radius: int = 0
+    # Enables drop-shadow glow on RefPanelBox (cyber-anime aesthetic).
+    panel_shadow: bool = False
 
 
 _THEME_MAP: dict[str, ThemeSpec] = {
@@ -85,6 +89,16 @@ _THEME_MAP: dict[str, ThemeSpec] = {
         bg_image="bg_dva.png",
         main_frame_alpha=155, sidebar_alpha=170, content_alpha=140,
     ),
+    "Neon Anime": ThemeSpec(
+        bg0="#07030f", bg1="#0c0518", bg2="#110827", bg3="#190d38", bg4="#241452",
+        border0="#1e0c3a", border1="#3a1466", border2="#6a28a8",
+        text_primary="#f0e8ff", text_secondary="#b89be0", text_muted="#6a4a8a",
+        accent_primary="#ff2e88", accent_bright="#00eaff", accent_deep="#c8106e",
+        accent_dim="#3a0a28", accent_muted="#8b1858",
+        bg_image="bg_neon_anime.png",
+        main_frame_alpha=180, sidebar_alpha=200, content_alpha=160,
+        border_radius=12, panel_shadow=True,
+    ),
 }
 
 # Keep backward compat for code that reads accent_preset names
@@ -119,6 +133,8 @@ def app_stylesheet(settings: Mapping[str, object] | None = None) -> str:
     main_frame_bg = _hex_to_rgba(t.bg1, t.main_frame_alpha / 255)
     sidebar_bg = _hex_to_rgba(t.bg0, t.sidebar_alpha / 255)
     content_bg = _hex_to_rgba(t.bg1, t.content_alpha / 255)
+    radius = max(0, int(t.border_radius))
+    radius_small = max(0, min(radius, 6)) if radius else 4
 
     return f"""
 QWidget {{
@@ -218,6 +234,7 @@ QFrame#SidebarBrandBlock {{
 QGroupBox,
 QGroupBox#RefPanelBox {{
     border: 1px solid {t.border1};
+    border-radius: {radius}px;
     margin-top: 14px;
     padding: 8px 10px 10px 10px;
     background: rgba(6, 9, 12, 216);
@@ -258,7 +275,7 @@ QPushButton {{
     min-height: 24px;
     background: {t.bg3};
     border: 1px solid {t.border2};
-    border-radius: 0px;
+    border-radius: {radius}px;
     padding: 1px 8px;
     font-size: {font_size}px;
     font-weight: 600;
@@ -278,6 +295,7 @@ QPushButton#LinkCopyButton {{
 QPushButton#PrimaryButton {{
     background: {t.accent_primary};
     border: 1px solid {t.accent_bright};
+    border-radius: {radius}px;
     color: #ffffff;
     font-weight: 700;
     min-height: 26px;
@@ -319,6 +337,7 @@ QComboBox {{
     min-height: 22px;
     background: {t.bg3};
     border: 1px solid {t.border1};
+    border-radius: {radius}px;
     padding: 0 6px;
     color: {t.text_primary};
 }}
@@ -337,6 +356,7 @@ QLineEdit {{
     min-height: 22px;
     background: {t.bg3};
     border: 1px solid {t.border1};
+    border-radius: {radius}px;
     padding: 0 6px;
     color: {t.text_primary};
 }}
@@ -364,7 +384,7 @@ QFrame#MonitorCard,
 QFrame#SecurityLinkCard {{
     background: rgba(8, 11, 15, 220);
     border: 1px solid {t.border1};
-    border-radius: 0;
+    border-radius: {radius}px;
 }}
 QLabel[role="metric_title"] {{
     color: {t.text_secondary};
@@ -398,6 +418,7 @@ QTableWidget {{
     background: {t.bg3};
     alternate-background-color: {t.bg4};
     border: 1px solid {t.border1};
+    border-radius: {radius}px;
     gridline-color: {t.border0};
     selection-background-color: {t.accent_dim};
     color: {t.text_primary};
@@ -436,6 +457,7 @@ QFrame#AiChatPanel,
 QFrame#AiControlsPanel {{
     background: rgba(8, 11, 15, 220);
     border: 1px solid {t.border1};
+    border-radius: {radius}px;
 }}
 QFrame#AiSessionsHeader {{
     background: rgba(4, 6, 9, 180);

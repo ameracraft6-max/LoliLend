@@ -1,0 +1,13 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#dfe5ef" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Head -->
+  <circle cx="32" cy="28" r="14"/>
+  <!-- Hair tufts -->
+  <path d="M20 22 q12 -14 24 0"/>
+  <!-- Eyes -->
+  <circle cx="27" cy="28" r="1.6" fill="#dfe5ef" stroke="none"/>
+  <circle cx="37" cy="28" r="1.6" fill="#dfe5ef" stroke="none"/>
+  <!-- Smile -->
+  <path d="M27 35 q5 4 10 0"/>
+  <!-- Heart hint -->
+  <path d="M46 48 c-2 -3 -6 -2 -6 1 c0 3 4 5 6 6 c2 -1 6 -3 6 -6 c0 -3 -4 -4 -6 -1 z" fill="#dfe5ef" stroke="none" opacity="0.7"/>
+</svg>

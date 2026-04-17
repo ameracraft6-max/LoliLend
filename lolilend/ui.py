@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import time
 from typing import Protocol
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QGridLayout,
     QGroupBox,
@@ -27,7 +29,12 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QListView,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -41,6 +48,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QSystemTrayIcon,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -51,7 +59,12 @@ from PySide6.QtWidgets import (
 
 from lolilend.ai_ui import AiTabPage
 from lolilend.video_to_gif import GifSettings, VideoToGifService
-from lolilend.system_cleaner import SystemCleanerService, format_size as clean_format_size
+from lolilend.system_cleaner import (
+    DuplicateGroup,
+    SystemCleanerService,
+    format_size as clean_format_size,
+    list_category_files,
+)
 from lolilend.disk_health import get_snapshot as get_disk_snapshot, format_size as disk_format_size
 from lolilend.ram_booster import RamBoosterService
 from lolilend.crosshair_overlay import CrosshairConfig, CrosshairOverlayWindow, CROSSHAIR_STYLE_OPTIONS, render_crosshair
@@ -67,6 +80,28 @@ from lolilend.ping_overlay import PingOverlayWindow
 from lolilend.autostart_manager import AutostartEntry, AutostartManager
 from lolilend.netspeed_monitor import NetSpeedService, NetSpeedSnapshot
 from lolilend.netspeed_overlay import NetSpeedOverlayWindow
+from lolilend.screenshot_manager import (
+    GameGroup,
+    ScreenshotCapturer,
+    ScreenshotEntry,
+    ScreenshotHotkeyBinder,
+    ScreenshotLibrary,
+    get_foreground_process_name,
+)
+from lolilend.game_tunnel import (
+    GameTunnelEndpoint,
+    GameTunnelStore,
+    SystemProxyManager,
+    TcpRelay,
+    measure_tcp_ping,
+)
+from lolilend.companion import (
+    STATE_LABELS as COMPANION_STATE_LABELS,
+    CompanionController,
+    CompanionState,
+    CompanionWindow,
+)
+from lolilend.companion_ai import CompanionAiBrain, CompanionTokenStore
 from lolilend.task_scheduler import TaskSchedulerService, ScheduledTask
 from lolilend.hosts_manager import HostsManagerService, HostEntry
 from lolilend.general_settings import GeneralSettings, GeneralSettingsStore
@@ -82,7 +117,7 @@ from lolilend.monitoring import (
 from lolilend.runtime import WindowsElevationManager, asset_path
 from lolilend.schema import ControlSpec, SectionSpec, TabSpec, tabs_schema
 from lolilend.telegram_proxy import TelegramProxyConfig, TelegramProxyService, TelegramProxyStore
-from lolilend.theme import app_stylesheet
+from lolilend.theme import VISUAL_THEMES, app_stylesheet, get_theme
 from lolilend.ui_state import decode_qbytearray, encode_qbytearray
 from lolilend.version import APP_NAME
 
@@ -289,21 +324,38 @@ class HudBackgroundSurface(QFrame):
         super().__init__()
         self.setObjectName("HudBackgroundSurface")
         self._pixmap = QPixmap(str(_BACKGROUND_PATH)) if _BACKGROUND_PATH.exists() else QPixmap()
+        self._theme_name = "Dark"
+        self._particle_overlay = None  # created lazily when Neon Anime is activated
 
     def set_theme_background(self, theme_name: str) -> None:
-        """Reload background image for the given theme."""
-        from lolilend.theme import get_theme
+        """Reload background image + toggle particle overlay for the given theme."""
         from lolilend.runtime import asset_path
+        self._theme_name = theme_name
         spec = get_theme(theme_name)
         if spec.bg_image:
             path = asset_path(spec.bg_image)
             if path.exists():
                 self._pixmap = QPixmap(str(path))
-                self.update()
-                return
-        # No image for this theme — use gradient fallback
-        self._pixmap = QPixmap()
+            else:
+                self._pixmap = QPixmap()
+        else:
+            self._pixmap = QPixmap()
+
+        if theme_name == "Neon Anime":
+            if self._particle_overlay is None:
+                from lolilend.neon_particles import NeonParticleOverlay
+                self._particle_overlay = NeonParticleOverlay(self)
+            self._particle_overlay.set_palette(spec.accent_primary, spec.accent_bright)
+            self._particle_overlay.setGeometry(self.rect())
+            self._particle_overlay.start()
+        elif self._particle_overlay is not None:
+            self._particle_overlay.stop()
         self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        if self._particle_overlay is not None:
+            self._particle_overlay.setGeometry(self.rect())
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
@@ -316,6 +368,12 @@ class HudBackgroundSurface(QFrame):
             offset_x = (scaled.width() - rect.width()) // 2
             offset_y = (scaled.height() - rect.height()) // 2
             painter.drawPixmap(0, 0, scaled, offset_x, offset_y, rect.width(), rect.height())
+        elif self._theme_name == "Neon Anime":
+            gradient = QLinearGradient(0, 0, rect.width(), rect.height())
+            gradient.setColorAt(0.0, QColor("#120534"))
+            gradient.setColorAt(0.45, QColor("#0a0418"))
+            gradient.setColorAt(1.0, QColor("#2a0a3a"))
+            painter.fillRect(rect, gradient)
         else:
             gradient = QLinearGradient(0, 0, 0, rect.height())
             gradient.setColorAt(0.0, QColor("#232933"))
@@ -323,11 +381,14 @@ class HudBackgroundSurface(QFrame):
             gradient.setColorAt(1.0, QColor("#0f1218"))
             painter.fillRect(rect, gradient)
 
-        painter.fillRect(rect, QColor(4, 6, 10, 178))
+        is_neon = self._theme_name == "Neon Anime"
+        dim_alpha = 96 if is_neon else 178
+        painter.fillRect(rect, QColor(4, 6, 10, dim_alpha))
         painter.fillRect(0, 0, rect.width(), 60, QColor(0, 0, 0, 44))
         painter.fillRect(0, rect.height() - 90, rect.width(), 90, QColor(0, 0, 0, 54))
 
-        painter.setPen(QPen(QColor(255, 255, 255, 10), 1))
+        scanline_color = QColor(0, 234, 255, 14) if is_neon else QColor(255, 255, 255, 10)
+        painter.setPen(QPen(scanline_color, 1))
         step = 3
         for y in range(0, rect.height(), step):
             painter.drawLine(0, y, rect.width(), y)
@@ -335,16 +396,52 @@ class HudBackgroundSurface(QFrame):
         font = QFont("Rajdhani Medium", 26)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor(245, 245, 245, 80))
-        painter.drawText(rect.adjusted(0, 0, -30, -18), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), "LOLILEND")
-        painter.setPen(QColor(30, 34, 42, 220))
-        painter.drawText(rect.adjusted(-2, -2, -32, -20), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), "LOLILEND")
+        if is_neon:
+            painter.setPen(QColor(0, 234, 255, 110))
+            painter.drawText(rect.adjusted(0, 0, -30, -18), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), "LOLILEND")
+            painter.setPen(QColor(255, 46, 136, 160))
+            painter.drawText(rect.adjusted(-2, -2, -32, -20), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), "LOLILEND")
+        else:
+            painter.setPen(QColor(245, 245, 245, 80))
+            painter.drawText(rect.adjusted(0, 0, -30, -18), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), "LOLILEND")
+            painter.setPen(QColor(30, 34, 42, 220))
+            painter.drawText(rect.adjusted(-2, -2, -32, -20), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom), "LOLILEND")
 
 
 class RefPanelBox(QGroupBox):
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(title, parent)
         self.setObjectName("RefPanelBox")
+
+
+def _apply_panel_shadows(root: QWidget, theme_name: str) -> None:
+    """Enable or remove glow shadows on RefPanelBox widgets based on the theme.
+
+    Applies only to top-level panels (parent is not itself inside another RefPanelBox) to
+    keep the effect count small — QGraphicsDropShadowEffect disables hw acceleration on
+    the target, so dozens of nested effects can stutter the UI.
+    """
+    spec = get_theme(theme_name)
+    for panel in root.findChildren(RefPanelBox):
+        is_nested = False
+        walker = panel.parentWidget()
+        while walker is not None:
+            if isinstance(walker, RefPanelBox):
+                is_nested = True
+                break
+            walker = walker.parentWidget()
+        if spec.panel_shadow and not is_nested:
+            effect = panel.graphicsEffect()
+            if not isinstance(effect, QGraphicsDropShadowEffect):
+                effect = QGraphicsDropShadowEffect(panel)
+                panel.setGraphicsEffect(effect)
+            glow = QColor(spec.accent_bright)
+            glow.setAlpha(90)
+            effect.setColor(glow)
+            effect.setBlurRadius(14)
+            effect.setOffset(0, 0)
+        elif panel.graphicsEffect() is not None:
+            panel.setGraphicsEffect(None)
 
 
 class RefSectionHeader(QLabel):
@@ -936,7 +1033,7 @@ class AdvancedGeneralTabPage(QWidget):
         accent_title.setProperty("role", "ref_section")
         left_layout.addWidget(accent_title)
         self.accent_combo = QComboBox()
-        self.accent_combo.addItems(["Dark", "Ocean", "Synthwave", "D.Va"])
+        self.accent_combo.addItems(list(VISUAL_THEMES))
         left_layout.addWidget(self.accent_combo)
 
         self.compact_mode_checkbox = QCheckBox("Компактный режим")
@@ -1685,79 +1782,204 @@ class RamBoosterTabPage(QWidget):
 
 
 class SystemCleanerTabPage(QWidget):
+    KEEP_STRATEGIES = (
+        ("Оставить самый старый", "keep_oldest"),
+        ("Оставить самый новый", "keep_newest"),
+        ("Оставить первый в списке", "keep_first"),
+    )
+
     def __init__(self, on_status: Callable[[str], None]) -> None:
         super().__init__()
         self._on_status = on_status
         self._service = SystemCleanerService()
-        self._checkboxes: list[tuple[QCheckBox, int]] = []
+        self._dupes_scan_root: Path | None = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
+        root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
 
-        box = RefPanelBox("Очистка системы")
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(12, 16, 12, 10)
-        layout.setSpacing(8)
-
-        scan_row = QHBoxLayout()
-        scan_row.setSpacing(8)
-        self._scan_btn = QPushButton("Сканировать")
-        self._scan_btn.clicked.connect(self._start_scan)
-        scan_row.addWidget(self._scan_btn)
-        self._scan_status = QLabel("")
-        scan_row.addWidget(self._scan_status, 1)
-        layout.addLayout(scan_row)
-
-        self._categories_frame = QFrame()
-        self._categories_layout = QVBoxLayout(self._categories_frame)
-        self._categories_layout.setContentsMargins(0, 0, 0, 0)
-        self._categories_layout.setSpacing(4)
-        self._categories_frame.setVisible(False)
-        layout.addWidget(self._categories_frame)
-
-        self._total_label = QLabel("")
+        # --- Top action bar (shared across tabs) ---
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self._scan_btn = QPushButton("🔍 Сканировать")
+        self._scan_btn.setObjectName("PrimaryButton")
+        top.addWidget(self._scan_btn)
+        self._total_label = QLabel("К удалению: —")
         self._total_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self._total_label.setVisible(False)
-        layout.addWidget(self._total_label)
+        top.addWidget(self._total_label, 1)
+        self._clean_btn = QPushButton("🗑 Очистить выбранное")
+        self._clean_btn.setEnabled(False)
+        top.addWidget(self._clean_btn)
+        root.addLayout(top)
 
+        # --- Sub-tabs: Categories | Duplicates ---
+        self._sub_tabs = QTabWidget()
+        root.addWidget(self._sub_tabs, 1)
+
+        # ---- Tab 1: Categories (split layout) ----
+        cats_tab = QWidget()
+        cats_layout = QVBoxLayout(cats_tab)
+        cats_layout.setContentsMargins(0, 4, 0, 0)
+        cats_layout.setSpacing(4)
+
+        cats_split = QSplitter(Qt.Orientation.Horizontal)
+        cats_split.setChildrenCollapsible(False)
+
+        # Left: category list with checkboxes
+        left_frame = QFrame()
+        left_layout = QVBoxLayout(left_frame)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
+        left_layout.addWidget(QLabel("Категории"))
+        self._cats_list = QListWidget()
+        self._cats_list.setAlternatingRowColors(True)
+        left_layout.addWidget(self._cats_list, 1)
+        cats_split.addWidget(left_frame)
+
+        # Right: file detail table
+        right_frame = QFrame()
+        right_layout = QVBoxLayout(right_frame)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
+        self._files_header_label = QLabel("Файлы: выберите категорию слева")
+        right_layout.addWidget(self._files_header_label)
+        self._files_table = QTableWidget(0, 3)
+        self._files_table.setHorizontalHeaderLabels(["Файл", "Размер", "Изменён"])
+        self._files_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._files_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._files_table.setSortingEnabled(True)
+        self._files_table.horizontalHeader().setStretchLastSection(True)
+        self._files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        right_layout.addWidget(self._files_table, 1)
+        cats_split.addWidget(right_frame)
+
+        cats_split.setStretchFactor(0, 0)
+        cats_split.setStretchFactor(1, 1)
+        cats_split.setSizes([260, 700])
+        cats_layout.addWidget(cats_split, 1)
+        self._sub_tabs.addTab(cats_tab, "Категории")
+
+        # ---- Tab 2: Duplicates ----
+        dupes_tab = QWidget()
+        dupes_layout = QVBoxLayout(dupes_tab)
+        dupes_layout.setContentsMargins(0, 4, 0, 0)
+        dupes_layout.setSpacing(6)
+
+        dupes_top = QHBoxLayout()
+        dupes_top.setSpacing(6)
+        self._dupes_path_edit = QLineEdit()
+        self._dupes_path_edit.setReadOnly(True)
+        self._dupes_path_edit.setPlaceholderText("Папка для поиска дубликатов…")
+        dupes_top.addWidget(self._dupes_path_edit, 1)
+        self._dupes_pick_btn = QPushButton("📁 Выбрать папку")
+        dupes_top.addWidget(self._dupes_pick_btn)
+        dupes_top.addWidget(QLabel("Мин. размер:"))
+        self._dupes_min_spin = QSpinBox()
+        self._dupes_min_spin.setRange(0, 10240)
+        self._dupes_min_spin.setValue(1)
+        self._dupes_min_spin.setSuffix(" MB")
+        dupes_top.addWidget(self._dupes_min_spin)
+        self._dupes_scan_btn = QPushButton("🔍 Найти дубликаты")
+        self._dupes_scan_btn.setObjectName("PrimaryButton")
+        self._dupes_scan_btn.setEnabled(False)
+        dupes_top.addWidget(self._dupes_scan_btn)
+        dupes_layout.addLayout(dupes_top)
+
+        dupes_split = QSplitter(Qt.Orientation.Horizontal)
+        dupes_split.setChildrenCollapsible(False)
+
+        # Left: group list
+        dg_left = QFrame()
+        dg_left_layout = QVBoxLayout(dg_left)
+        dg_left_layout.setContentsMargins(0, 0, 0, 0)
+        dg_left_layout.setSpacing(4)
+        dg_left_layout.addWidget(QLabel("Группы дубликатов"))
+        self._dupes_groups_list = QListWidget()
+        self._dupes_groups_list.setAlternatingRowColors(True)
+        dg_left_layout.addWidget(self._dupes_groups_list, 1)
+        dupes_split.addWidget(dg_left)
+
+        # Right: files in selected group
+        dg_right = QFrame()
+        dg_right_layout = QVBoxLayout(dg_right)
+        dg_right_layout.setContentsMargins(0, 0, 0, 0)
+        dg_right_layout.setSpacing(4)
+        dg_right_layout.addWidget(QLabel("Файлы в группе"))
+        self._dupes_files_table = QTableWidget(0, 2)
+        self._dupes_files_table.setHorizontalHeaderLabels(["Путь", "Изменён"])
+        self._dupes_files_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._dupes_files_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._dupes_files_table.horizontalHeader().setStretchLastSection(True)
+        self._dupes_files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        dg_right_layout.addWidget(self._dupes_files_table, 1)
+        dupes_split.addWidget(dg_right)
+
+        dupes_split.setStretchFactor(0, 1)
+        dupes_split.setStretchFactor(1, 1)
+        dupes_split.setSizes([400, 500])
+        dupes_layout.addWidget(dupes_split, 1)
+
+        dupes_bottom = QHBoxLayout()
+        dupes_bottom.setSpacing(6)
+        dupes_bottom.addWidget(QLabel("Стратегия:"))
+        self._dupes_strategy_combo = QComboBox()
+        for label, key in self.KEEP_STRATEGIES:
+            self._dupes_strategy_combo.addItem(label, key)
+        dupes_bottom.addWidget(self._dupes_strategy_combo)
+        dupes_bottom.addStretch(1)
+        self._dupes_summary_label = QLabel("—")
+        self._dupes_summary_label.setProperty("role", "ref_section")
+        dupes_bottom.addWidget(self._dupes_summary_label)
+        self._dupes_delete_btn = QPushButton("🗑 Удалить дубликаты")
+        self._dupes_delete_btn.setEnabled(False)
+        dupes_bottom.addWidget(self._dupes_delete_btn)
+        dupes_layout.addLayout(dupes_bottom)
+
+        self._sub_tabs.addTab(dupes_tab, "Дубликаты")
+
+        # --- Bottom: progress + result ---
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.setVisible(False)
-        layout.addWidget(self._progress)
-
-        self._clean_btn = QPushButton("Очистить выбранное")
-        self._clean_btn.setVisible(False)
-        self._clean_btn.clicked.connect(self._start_clean)
-        layout.addWidget(self._clean_btn)
+        root.addWidget(self._progress)
 
         self._result_label = QLabel("")
         self._result_label.setWordWrap(True)
-        layout.addWidget(self._result_label)
+        root.addWidget(self._result_label)
 
-        root.addWidget(box)
-        root.addStretch(1)
+        # --- Wire ---
+        self._scan_btn.clicked.connect(self._start_scan)
+        self._clean_btn.clicked.connect(self._start_clean)
+        self._cats_list.currentRowChanged.connect(self._on_category_row_changed)
+        self._cats_list.itemChanged.connect(self._on_category_check_changed)
+        self._dupes_pick_btn.clicked.connect(self._pick_dupes_folder)
+        self._dupes_scan_btn.clicked.connect(self._start_dupes_scan)
+        self._dupes_groups_list.currentRowChanged.connect(self._on_group_row_changed)
+        self._dupes_delete_btn.clicked.connect(self._start_dupes_delete)
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(300)
         self._poll_timer.timeout.connect(self._poll)
 
+    # ---------- lifecycle ----------
     def on_shown(self) -> None:
         pass
 
     def on_hidden(self) -> None:
         pass
 
+    # ---------- categories flow ----------
     def _start_scan(self) -> None:
         if self._service.running:
             return
         self._scan_btn.setEnabled(False)
-        self._scan_status.setText("Сканирование...")
+        self._clean_btn.setEnabled(False)
+        self._total_label.setText("Сканирование…")
         self._result_label.setText("")
-        self._clean_btn.setVisible(False)
-        self._total_label.setVisible(False)
-        self._categories_frame.setVisible(False)
+        self._cats_list.clear()
+        self._files_table.setRowCount(0)
+        self._progress.setVisible(False)
         self._service.start_scan()
         self._poll_timer.start()
 
@@ -1765,80 +1987,229 @@ class SystemCleanerTabPage(QWidget):
         if self._service.running:
             return
         cats = self._service.categories
-        for cb, idx in self._checkboxes:
-            if idx < len(cats):
-                cats[idx].checked = cb.isChecked()
+        any_checked = any(c.checked for c in cats)
+        if not any_checked:
+            self._on_status("Отметь хотя бы одну категорию")
+            return
+        total_bytes = sum(c.size_bytes for c in cats if c.checked)
+        confirm = QMessageBox.question(
+            self,
+            "Подтвердить очистку",
+            f"Будет удалено навсегда: {clean_format_size(total_bytes)}\n\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._scan_btn.setEnabled(False)
         self._clean_btn.setEnabled(False)
         self._progress.setVisible(True)
         self._progress.setValue(0)
-        self._result_label.setText("Очистка...")
+        self._result_label.setText("Очистка…")
         self._service.start_clean(cats)
         self._poll_timer.start()
 
-    def _poll(self) -> None:
+    def _on_category_row_changed(self, row: int) -> None:
+        cats = self._service.categories
+        if row < 0 or row >= len(cats):
+            self._files_table.setRowCount(0)
+            self._files_header_label.setText("Файлы: выберите категорию слева")
+            return
+        cat = cats[row]
+        self._files_header_label.setText(f"Файлы: {cat.name}  ·  {len(cat.paths)} путей (top-200 по размеру)")
+        self._render_category_files(cat.paths)
+
+    def _on_category_check_changed(self, item: QListWidgetItem) -> None:
+        idx = self._cats_list.row(item)
+        cats = self._service.categories
+        if idx < 0 or idx >= len(cats):
+            return
+        cats[idx].checked = item.checkState() == Qt.CheckState.Checked
+        self._update_total()
+
+    def _render_category_files(self, paths: list[str]) -> None:
+        self._files_table.setSortingEnabled(False)
+        items = list_category_files(paths, max_items=200)
+        self._files_table.setRowCount(len(items))
+        for row, (disp_path, size, mtime) in enumerate(items):
+            name_item = QTableWidgetItem(disp_path)
+            size_item = QTableWidgetItem()
+            size_item.setText(clean_format_size(size))
+            size_item.setData(Qt.ItemDataRole.EditRole, int(size))
+            date_item = QTableWidgetItem()
+            date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            date_item.setText(date_str)
+            date_item.setData(Qt.ItemDataRole.EditRole, float(mtime))
+            self._files_table.setItem(row, 0, name_item)
+            self._files_table.setItem(row, 1, size_item)
+            self._files_table.setItem(row, 2, date_item)
+        self._files_table.setSortingEnabled(True)
+
+    def _populate_categories(self, cats) -> None:
+        self._cats_list.blockSignals(True)
+        self._cats_list.clear()
+        for cat in cats:
+            tag = "🎮 " if cat.is_game else ""
+            label = f"{tag}{cat.name}  ·  {clean_format_size(cat.size_bytes)}"
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if cat.checked else Qt.CheckState.Unchecked)
+            self._cats_list.addItem(item)
+        self._cats_list.blockSignals(False)
+        self._update_total()
+        self._clean_btn.setEnabled(True)
+
+    def _update_total(self) -> None:
+        cats = self._service.categories
+        total = sum(c.size_bytes for c in cats if c.checked)
+        self._total_label.setText(f"К удалению: {clean_format_size(total)}")
+
+    # ---------- duplicates flow ----------
+    def _pick_dupes_folder(self) -> None:
+        start = str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Папка для поиска дубликатов", start)
+        if not chosen:
+            return
+        self._dupes_path_edit.setText(chosen)
+        self._dupes_scan_root = Path(chosen)
+        self._dupes_scan_btn.setEnabled(True)
+
+    def _start_dupes_scan(self) -> None:
         if self._service.running:
-            if self._service.mode == "clean":
-                cur, total = self._service.progress
-                if total > 0:
-                    self._progress.setValue(int(cur * 100 / total))
+            return
+        if self._dupes_scan_root is None:
+            return
+        self._dupes_scan_btn.setEnabled(False)
+        self._dupes_delete_btn.setEnabled(False)
+        self._dupes_groups_list.clear()
+        self._dupes_files_table.setRowCount(0)
+        self._dupes_summary_label.setText("Сканирование…")
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        min_mb = int(self._dupes_min_spin.value())
+        self._service.start_duplicate_scan(self._dupes_scan_root, min_mb * 1024 * 1024)
+        self._poll_timer.start()
+
+    def _on_group_row_changed(self, row: int) -> None:
+        groups = self._service.duplicates
+        if row < 0 or row >= len(groups):
+            self._dupes_files_table.setRowCount(0)
+            return
+        group = groups[row]
+        self._dupes_files_table.setRowCount(len(group.files))
+        for r, path in enumerate(group.files):
+            path_item = QTableWidgetItem(str(path))
+            try:
+                mtime = path.stat().st_mtime
+                date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                date_str = "—"
+            date_item = QTableWidgetItem(date_str)
+            self._dupes_files_table.setItem(r, 0, path_item)
+            self._dupes_files_table.setItem(r, 1, date_item)
+
+    def _start_dupes_delete(self) -> None:
+        if self._service.running:
+            return
+        groups = self._service.duplicates
+        if not groups:
+            return
+        total_wasted = sum(g.total_wasted_bytes for g in groups)
+        total_files = sum(len(g.files) - 1 for g in groups)
+        confirm = QMessageBox.question(
+            self,
+            "Подтвердить удаление дубликатов",
+            f"Будет удалено {total_files} файлов ({clean_format_size(total_wasted)}).\n"
+            f"В каждой группе останется один файл.\n\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        strategy = self._dupes_strategy_combo.currentData() or "keep_oldest"
+        self._dupes_delete_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._result_label.setText("Удаление дубликатов…")
+        self._service.start_duplicate_delete(groups, strategy)
+        self._poll_timer.start()
+
+    def _render_duplicate_groups(self, groups) -> None:
+        self._dupes_groups_list.clear()
+        for group in groups:
+            preview = group.files[0].name if group.files else "—"
+            label = (
+                f"{len(group.files)}× {preview}  ·  "
+                f"{clean_format_size(group.size_bytes)} каждый  ·  "
+                f"освободит {clean_format_size(group.total_wasted_bytes)}"
+            )
+            self._dupes_groups_list.addItem(label)
+        total_wasted = sum(g.total_wasted_bytes for g in groups)
+        self._dupes_summary_label.setText(
+            f"Групп: {len(groups)}  ·  можно освободить: {clean_format_size(total_wasted)}"
+        )
+        self._dupes_delete_btn.setEnabled(bool(groups))
+
+    # ---------- shared poll ----------
+    def _poll(self) -> None:
+        mode = self._service.mode
+        if self._service.running:
+            cur, total = self._service.progress
+            if total > 0:
+                self._progress.setValue(int(cur * 100 / total))
             return
 
         self._poll_timer.stop()
         self._scan_btn.setEnabled(True)
 
-        if self._service.mode == "scan":
+        if mode == "scan":
             cats = self._service.categories
-            self._build_category_list(cats)
-            self._scan_status.setText(f"Найдено {len(cats)} категорий")
-        elif self._service.mode == "clean":
+            err = self._service.last_error
+            if err:
+                self._result_label.setText(err)
+                self._result_label.setStyleSheet("color: #ff7a7a;")
+                self._on_status(err)
+                return
+            self._populate_categories(cats)
+            self._on_status(f"Найдено {len(cats)} категорий")
+        elif mode == "clean":
             result = self._service.result
-            if result:
+            if result is not None:
                 self._progress.setValue(100)
                 self._result_label.setText(
                     f"Освобождено: {clean_format_size(result.freed_bytes)} "
-                    f"({result.deleted_files} файлов)"
+                    f"({result.deleted_files} файлов, ошибок: {result.errors})"
                 )
                 self._result_label.setStyleSheet("color: #56ff98;")
                 self._on_status(f"Очистка завершена: {clean_format_size(result.freed_bytes)}")
-                self._clean_btn.setEnabled(True)
-
-    def _build_category_list(self, cats) -> None:
-        # Clear old
-        while self._categories_layout.count():
-            item = self._categories_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._checkboxes.clear()
-
-        for i, cat in enumerate(cats):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            cb = QCheckBox(cat.name)
-            cb.setChecked(cat.checked)
-            cb.toggled.connect(self._update_total)
-            row.addWidget(cb, 1)
-            size_label = QLabel(clean_format_size(cat.size_bytes))
-            size_label.setStyleSheet("color: #ff9dc6;")
-            size_label.setMinimumWidth(80)
-            row.addWidget(size_label)
-            self._checkboxes.append((cb, i))
-            container = QWidget()
-            container.setLayout(row)
-            self._categories_layout.addWidget(container)
-
-        self._categories_frame.setVisible(True)
-        self._clean_btn.setVisible(True)
-        self._clean_btn.setEnabled(True)
-        self._total_label.setVisible(True)
-        self._update_total()
-
-    def _update_total(self) -> None:
-        cats = self._service.categories
-        total = 0
-        for cb, idx in self._checkboxes:
-            if cb.isChecked() and idx < len(cats):
-                total += cats[idx].size_bytes
-        self._total_label.setText(f"К удалению: {clean_format_size(total)}")
+            # After cleaning, refresh sizes
+            self._start_scan()
+        elif mode == "scan_dupes":
+            err = self._service.last_error
+            if err:
+                self._dupes_summary_label.setText(err)
+                self._result_label.setText(err)
+                self._result_label.setStyleSheet("color: #ff7a7a;")
+                self._on_status(err)
+                self._dupes_scan_btn.setEnabled(True)
+                self._progress.setVisible(False)
+                return
+            groups = self._service.duplicates
+            self._render_duplicate_groups(groups)
+            self._dupes_scan_btn.setEnabled(True)
+            self._progress.setVisible(False)
+            self._on_status(f"Найдено {len(groups)} групп дубликатов")
+        elif mode == "delete_dupes":
+            result = self._service.result
+            if result is not None:
+                self._progress.setValue(100)
+                self._result_label.setText(
+                    f"Дубликатов удалено: {result.deleted_files} "
+                    f"({clean_format_size(result.freed_bytes)}, ошибок: {result.errors})"
+                )
+                self._result_label.setStyleSheet("color: #56ff98;")
+                self._on_status(f"Дубликаты удалены: {clean_format_size(result.freed_bytes)}")
+            # Re-run scan to refresh groups
+            if self._dupes_scan_root is not None:
+                self._start_dupes_scan()
 
 
 class DiskHealthTabPage(QWidget):
@@ -5658,7 +6029,9 @@ class ClipboardTabPage(QWidget):
         self._del_btn = QPushButton("Удалить")
         self._clear_btn = QPushButton("Очистить всё")
         self._clear_btn.setObjectName("ClipboardClearButton")
-        for btn in (self._copy_btn, self._pin_btn, self._del_btn, self._clear_btn):
+        self._save_image_btn = QPushButton("📷 Сохранить картинку как скриншот")
+        self._save_image_btn.setToolTip("Если в буфере изображение — сохранит его в Менеджер скриншотов")
+        for btn in (self._copy_btn, self._pin_btn, self._del_btn, self._clear_btn, self._save_image_btn):
             toolbar.addWidget(btn)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
@@ -5672,6 +6045,7 @@ class ClipboardTabPage(QWidget):
         self._pin_btn.clicked.connect(self._toggle_pin)
         self._del_btn.clicked.connect(self._delete_selected)
         self._clear_btn.clicked.connect(self._clear_history)
+        self._save_image_btn.clicked.connect(self.save_clipboard_image_as_screenshot)
         self._search_edit.textChanged.connect(self._refresh_list)
         self._size_spin.valueChanged.connect(self._on_size_changed)
 
@@ -5782,6 +6156,1123 @@ class ClipboardTabPage(QWidget):
         settings.clipboard_history_size = value
         self._store.save_settings(settings)
 
+    def save_clipboard_image_as_screenshot(self) -> None:
+        """Saves an image currently on the OS clipboard as a screenshot via ScreenshotLibrary."""
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            self._on_status("Буфер обмена недоступен")
+            return
+        image = clipboard.image()
+        if image.isNull():
+            self._on_status("В буфере обмена нет изображения")
+            return
+        from PySide6.QtGui import QPixmap as _QPixmap
+        pixmap = _QPixmap.fromImage(image)
+        store = GeneralSettingsStore()
+        settings = store.load_settings()
+        root = Path(settings.screenshot_dir) if settings.screenshot_dir else (store.base_dir / "screenshots")
+        library = ScreenshotLibrary(root)
+        game = get_foreground_process_name()
+        entry = library.save_pixmap(pixmap, f"{game}_clipboard")
+        if entry is not None:
+            self._on_status(f"Сохранено: {entry.path}")
+        else:
+            self._on_status("Не удалось сохранить изображение")
+
+
+def _format_size_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+
+class ScreenshotManagerTabPage(QWidget):
+    SORT_MODES = (
+        ("Сначала новые", "date_desc"),
+        ("Сначала старые", "date_asc"),
+        ("Имя A→Z", "name_asc"),
+        ("Размер ↓", "size_desc"),
+        ("Размер ↑", "size_asc"),
+    )
+
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._store = GeneralSettingsStore()
+        self._library = ScreenshotLibrary(self._resolve_root())
+        self._capturer = ScreenshotCapturer(self._library)
+        self._hotkey = ScreenshotHotkeyBinder(self._hotkey_triggered)
+        self._groups: list[GameGroup] = []
+        self._current_entries: list[ScreenshotEntry] = []
+        self._sort_mode = "date_desc"
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
+
+        # --- Top toolbar ---
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
+        self._capture_btn = QPushButton("📷 Сделать скриншот")
+        self._capture_btn.setObjectName("PrimaryButton")
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("Активное окно", "window")
+        self._mode_combo.addItem("Весь экран", "fullscreen")
+        self._hotkey_edit = QLineEdit()
+        self._hotkey_edit.setPlaceholderText("Напр. Ctrl+Alt+S")
+        self._hotkey_edit.setMaximumWidth(170)
+        self._folder_btn = QPushButton("📁 Папка")
+        self._refresh_btn = QPushButton("🔄")
+        self._refresh_btn.setFixedWidth(36)
+        self._refresh_btn.setToolTip("Обновить список")
+        toolbar.addWidget(self._capture_btn)
+        toolbar.addWidget(QLabel("Режим:"))
+        toolbar.addWidget(self._mode_combo)
+        toolbar.addWidget(QLabel("Горячая клавиша:"))
+        toolbar.addWidget(self._hotkey_edit)
+        toolbar.addWidget(self._folder_btn)
+        toolbar.addWidget(self._refresh_btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
+
+        # --- Main split: games | gallery ---
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        games_frame = QFrame()
+        games_layout = QVBoxLayout(games_frame)
+        games_layout.setContentsMargins(0, 0, 0, 0)
+        games_layout.setSpacing(4)
+        games_layout.addWidget(QLabel("Игры"))
+        self._games_list = QListWidget()
+        games_layout.addWidget(self._games_list, 1)
+        self._delete_group_btn = QPushButton("🗑 Удалить все этой игры")
+        games_layout.addWidget(self._delete_group_btn)
+        splitter.addWidget(games_frame)
+
+        gallery_frame = QFrame()
+        gallery_layout = QVBoxLayout(gallery_frame)
+        gallery_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_layout.setSpacing(4)
+        gallery_header = QHBoxLayout()
+        gallery_header.setSpacing(6)
+        self._gallery_label = QLabel("Скриншоты")
+        gallery_header.addWidget(self._gallery_label)
+        gallery_header.addStretch(1)
+        gallery_header.addWidget(QLabel("Сортировка:"))
+        self._sort_combo = QComboBox()
+        for label, key in self.SORT_MODES:
+            self._sort_combo.addItem(label, key)
+        gallery_header.addWidget(self._sort_combo)
+        gallery_layout.addLayout(gallery_header)
+
+        self._gallery = QListWidget()
+        self._gallery.setViewMode(QListView.ViewMode.IconMode)
+        self._gallery.setIconSize(QSize(192, 108))
+        self._gallery.setResizeMode(QListView.ResizeMode.Adjust)
+        self._gallery.setMovement(QListView.Movement.Static)
+        self._gallery.setSpacing(6)
+        self._gallery.setUniformItemSizes(True)
+        self._gallery.setWordWrap(True)
+        gallery_layout.addWidget(self._gallery, 1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        self._open_btn = QPushButton("Открыть")
+        self._reveal_btn = QPushButton("Показать в проводнике")
+        self._copy_btn = QPushButton("Копировать в буфер")
+        self._delete_btn = QPushButton("Удалить")
+        for b in (self._open_btn, self._reveal_btn, self._copy_btn, self._delete_btn):
+            actions.addWidget(b)
+        actions.addStretch(1)
+        gallery_layout.addLayout(actions)
+
+        splitter.addWidget(gallery_frame)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([220, 900])
+        root.addWidget(splitter, 1)
+
+        self._info_label = QLabel("")
+        self._info_label.setProperty("role", "ref_section")
+        root.addWidget(self._info_label)
+
+        # --- Wire up ---
+        self._capture_btn.clicked.connect(self._capture_now)
+        self._refresh_btn.clicked.connect(lambda: self._reload())
+        self._folder_btn.clicked.connect(self._pick_folder)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self._hotkey_edit.editingFinished.connect(self._apply_hotkey)
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        self._games_list.currentRowChanged.connect(self._on_game_selected)
+        self._delete_group_btn.clicked.connect(self._delete_current_group)
+        self._open_btn.clicked.connect(self._open_selected)
+        self._reveal_btn.clicked.connect(self._reveal_selected)
+        self._copy_btn.clicked.connect(self._copy_selected_to_clipboard)
+        self._delete_btn.clicked.connect(self._delete_selected)
+        self._gallery.itemDoubleClicked.connect(lambda _item: self._open_selected())
+
+        self._load_settings_to_ui()
+        self._reload()
+
+    # ---------- lifecycle ----------
+    def on_shown(self) -> None:
+        self._reload()
+
+    def on_hidden(self) -> None:
+        pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._hotkey.unbind()
+        super().closeEvent(event)
+
+    # ---------- settings ----------
+    def _resolve_root(self) -> Path:
+        settings = self._store.load_settings()
+        if settings.screenshot_dir:
+            return Path(settings.screenshot_dir)
+        return self._store.base_dir / "screenshots"
+
+    def _load_settings_to_ui(self) -> None:
+        settings = self._store.load_settings()
+        for i in range(self._mode_combo.count()):
+            if self._mode_combo.itemData(i) == settings.screenshot_mode:
+                self._mode_combo.setCurrentIndex(i)
+                break
+        self._hotkey_edit.setText(settings.screenshot_hotkey)
+        self._apply_hotkey(silent=True)
+
+    def _persist(self, **overrides) -> None:
+        settings = self._store.load_settings()
+        for key, value in overrides.items():
+            setattr(settings, key, value)
+        self._store.save_settings(settings)
+
+    def _on_mode_changed(self) -> None:
+        self._persist(screenshot_mode=self._mode_combo.currentData())
+
+    def _apply_hotkey(self, silent: bool = False) -> None:
+        text = self._hotkey_edit.text().strip()
+        ok, err = self._hotkey.set_hotkey(text)
+        if text and not ok and not silent:
+            self._on_status(f"Не удалось зарегистрировать хоткей: {err}")
+        elif text and ok and not silent:
+            self._on_status(f"Хоткей зарегистрирован: {text}")
+        self._persist(screenshot_hotkey=text)
+
+    def _pick_folder(self) -> None:
+        current = str(self._library.root)
+        chosen = QFileDialog.getExistingDirectory(self, "Папка для скриншотов", current)
+        if not chosen:
+            return
+        self._library.set_root(Path(chosen))
+        self._persist(screenshot_dir=chosen)
+        self._on_status(f"Папка изменена: {chosen}")
+        self._reload()
+
+    # ---------- capture ----------
+    def _capture_now(self) -> None:
+        settings = self._store.load_settings()
+        mode = settings.screenshot_mode or "window"
+        entry = self._capturer.capture(mode=mode)
+        if entry is None:
+            self._on_status("Не удалось сделать скриншот")
+            return
+        if settings.screenshot_copy_to_clipboard:
+            self._copy_path_to_clipboard(entry.path)
+        self._on_status(f"Скриншот сохранён: {entry.filename} ({entry.game_name})")
+        self._reload(select_entry=entry)
+
+    def _hotkey_triggered(self) -> None:
+        # Hotkey fires on a Qt event-filter thread; using QTimer to defer to GUI thread.
+        QTimer.singleShot(0, self._capture_now)
+
+    # ---------- library ----------
+    def _reload(self, select_entry: ScreenshotEntry | None = None) -> None:
+        self._groups = self._library.scan()
+        previous_game = None
+        item = self._games_list.currentItem()
+        if item is not None:
+            previous_game = item.data(Qt.ItemDataRole.UserRole)
+
+        self._games_list.blockSignals(True)
+        self._games_list.clear()
+        total_count = 0
+        total_bytes = 0
+        target_row = 0
+        for idx, group in enumerate(self._groups):
+            label = f"{group.name}  ·  {group.count}"
+            entry_item = QListWidgetItem(label)
+            entry_item.setData(Qt.ItemDataRole.UserRole, group.name)
+            entry_item.setToolTip(
+                f"{group.name}\nСкриншотов: {group.count}\nРазмер: {_format_size_bytes(group.total_bytes)}"
+            )
+            self._games_list.addItem(entry_item)
+            total_count += group.count
+            total_bytes += group.total_bytes
+            if select_entry is not None and group.name == select_entry.game_name:
+                target_row = idx
+            elif previous_game and group.name == previous_game:
+                target_row = idx
+        self._games_list.blockSignals(False)
+
+        if self._groups:
+            self._games_list.setCurrentRow(target_row)
+        else:
+            self._gallery.clear()
+            self._current_entries = []
+            self._gallery_label.setText("Скриншоты (пусто)")
+
+        self._info_label.setText(
+            f"Всего: {total_count} скриншотов  ·  {_format_size_bytes(total_bytes)}  ·  "
+            f"Папка: {self._library.root}"
+        )
+
+        if select_entry is not None:
+            for i in range(self._gallery.count()):
+                it = self._gallery.item(i)
+                if it and it.data(Qt.ItemDataRole.UserRole) == str(select_entry.path):
+                    self._gallery.setCurrentRow(i)
+                    break
+
+    def _on_game_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self._groups):
+            self._gallery.clear()
+            self._current_entries = []
+            return
+        group = self._groups[row]
+        self._current_entries = list(group.entries)
+        self._apply_sort()
+        self._render_gallery()
+
+    def _on_sort_changed(self) -> None:
+        self._sort_mode = self._sort_combo.currentData() or "date_desc"
+        self._apply_sort()
+        self._render_gallery()
+
+    def _apply_sort(self) -> None:
+        if self._sort_mode == "date_desc":
+            self._current_entries.sort(key=lambda e: e.captured_at, reverse=True)
+        elif self._sort_mode == "date_asc":
+            self._current_entries.sort(key=lambda e: e.captured_at)
+        elif self._sort_mode == "name_asc":
+            self._current_entries.sort(key=lambda e: e.path.name.lower())
+        elif self._sort_mode == "size_desc":
+            self._current_entries.sort(key=lambda e: e.size_bytes, reverse=True)
+        elif self._sort_mode == "size_asc":
+            self._current_entries.sort(key=lambda e: e.size_bytes)
+
+    def _render_gallery(self) -> None:
+        self._gallery.clear()
+        for entry in self._current_entries:
+            pixmap = QPixmap(str(entry.path))
+            if pixmap.isNull():
+                continue
+            thumb = pixmap.scaled(
+                192, 108,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            item = QListWidgetItem(QIcon(thumb), entry.captured_at.strftime("%Y-%m-%d %H:%M"))
+            item.setData(Qt.ItemDataRole.UserRole, str(entry.path))
+            item.setToolTip(
+                f"{entry.filename}\n{entry.captured_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"{_format_size_bytes(entry.size_bytes)}"
+            )
+            self._gallery.addItem(item)
+        self._gallery_label.setText(f"Скриншоты: {len(self._current_entries)}")
+
+    # ---------- selection actions ----------
+    def _selected_entry(self) -> ScreenshotEntry | None:
+        item = self._gallery.currentItem()
+        if item is None:
+            return None
+        path_str = item.data(Qt.ItemDataRole.UserRole)
+        for entry in self._current_entries:
+            if str(entry.path) == path_str:
+                return entry
+        return None
+
+    def _open_selected(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(entry.path)))
+
+    def _reveal_selected(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        if os.name == "nt":
+            try:
+                import subprocess
+                subprocess.Popen(["explorer", "/select,", str(entry.path)])
+                return
+            except Exception:
+                pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(entry.path.parent)))
+
+    def _copy_path_to_clipboard(self, path: Path) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            return
+        image = QPixmap(str(path))
+        if not image.isNull():
+            clipboard.setPixmap(image)
+
+    def _copy_selected_to_clipboard(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        self._copy_path_to_clipboard(entry.path)
+        self._on_status(f"Скопировано в буфер: {entry.filename}")
+
+    def _delete_selected(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Удалить скриншот?",
+            f"Удалить файл\n{entry.filename}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        if self._library.delete(entry):
+            self._on_status(f"Удалено: {entry.filename}")
+            self._reload()
+        else:
+            self._on_status("Не удалось удалить файл")
+
+    def _delete_current_group(self) -> None:
+        row = self._games_list.currentRow()
+        if row < 0 or row >= len(self._groups):
+            return
+        group = self._groups[row]
+        confirm = QMessageBox.question(
+            self,
+            "Удалить группу?",
+            f"Удалить ВСЕ {group.count} скриншотов игры «{group.name}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        removed = self._library.delete_group(group.name)
+        self._on_status(f"Удалено {removed} файлов группы «{group.name}»")
+        self._reload()
+
+
+class _EndpointEditDialog(QDialog):
+    def __init__(self, parent: QWidget, endpoint: GameTunnelEndpoint | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Endpoint" if endpoint is None else "Редактировать endpoint")
+        self.setMinimumWidth(360)
+        form = QFormLayout(self)
+        self._label = QLineEdit()
+        self._region = QLineEdit()
+        self._host = QLineEdit()
+        self._port = QSpinBox()
+        self._port.setRange(1, 65535)
+        self._port.setValue(1080)
+        self._protocol = QComboBox()
+        self._protocol.addItem("SOCKS5", "socks5")
+        self._protocol.addItem("Direct TCP", "direct")
+        self._notes = QLineEdit()
+
+        form.addRow("Название:", self._label)
+        form.addRow("Регион:", self._region)
+        form.addRow("Хост:", self._host)
+        form.addRow("Порт:", self._port)
+        form.addRow("Протокол:", self._protocol)
+        form.addRow("Заметка:", self._notes)
+
+        if endpoint is not None:
+            self._label.setText(endpoint.label)
+            self._region.setText(endpoint.region)
+            self._host.setText(endpoint.host)
+            self._port.setValue(endpoint.port)
+            for i in range(self._protocol.count()):
+                if self._protocol.itemData(i) == endpoint.protocol:
+                    self._protocol.setCurrentIndex(i)
+                    break
+            self._notes.setText(endpoint.notes)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def get_values(self) -> tuple[str, str, str, int, str, str]:
+        return (
+            self._label.text().strip(),
+            self._region.text().strip(),
+            self._host.text().strip(),
+            int(self._port.value()),
+            str(self._protocol.currentData() or "socks5"),
+            self._notes.text().strip(),
+        )
+
+
+class GameTunnelTabPage(QWidget):
+    COLUMNS = ("Регион", "Название", "Хост:Порт", "Протокол", "Пинг (мс)", "Активен")
+
+    def __init__(self, on_status: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._store = GameTunnelStore()
+        self._state = self._store.load()
+        self._relay = TcpRelay()
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._refresh_status_badge)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
+
+        # --- Top control row ---
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        self._start_btn = QPushButton("▶ Запустить туннель")
+        self._start_btn.setObjectName("PrimaryButton")
+        self._stop_btn = QPushButton("■ Остановить")
+        self._stop_btn.setEnabled(False)
+        controls.addWidget(self._start_btn)
+        controls.addWidget(self._stop_btn)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Локальный порт:"))
+        self._port_spin = QSpinBox()
+        self._port_spin.setRange(1024, 65535)
+        self._port_spin.setValue(self._state.local_port)
+        self._port_spin.setMaximumWidth(100)
+        controls.addWidget(self._port_spin)
+        controls.addSpacing(12)
+        self._sys_proxy_check = QCheckBox("Назначить системным SOCKS-прокси (Windows)")
+        self._sys_proxy_check.setToolTip(
+            "Включает системный SOCKS5-прокси 127.0.0.1:<порт>. Браузеры/приложения, уважающие "
+            "системный прокси, начнут ходить через туннель. На UDP-игры (пинг в игре) влияет редко — "
+            "пригодно для матчмейкинга/логина."
+        )
+        controls.addWidget(self._sys_proxy_check)
+        controls.addStretch(1)
+        root.addLayout(controls)
+
+        # --- Status line ---
+        self._status_label = QLabel()
+        self._status_label.setProperty("role", "ref_section")
+        root.addWidget(self._status_label)
+
+        # --- Endpoints table ---
+        self._table = QTableWidget(0, len(self.COLUMNS))
+        self._table.setHorizontalHeaderLabels(self.COLUMNS)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSortingEnabled(True)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        root.addWidget(self._table, 1)
+
+        # --- Endpoint actions ---
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        self._add_btn = QPushButton("➕ Добавить")
+        self._edit_btn = QPushButton("✎ Изменить")
+        self._delete_btn = QPushButton("🗑 Удалить")
+        self._test_btn = QPushButton("Тест пинга")
+        self._test_all_btn = QPushButton("Тест всех")
+        self._set_active_btn = QPushButton("⭐ Сделать активным")
+        self._copy_btn = QPushButton("📋 Копировать адрес")
+        for b in (self._add_btn, self._edit_btn, self._delete_btn, self._test_btn,
+                  self._test_all_btn, self._set_active_btn, self._copy_btn):
+            actions.addWidget(b)
+        actions.addStretch(1)
+        root.addLayout(actions)
+
+        self._stats_label = QLabel("")
+        self._stats_label.setProperty("role", "ref_section")
+        root.addWidget(self._stats_label)
+
+        # --- Wire ---
+        self._start_btn.clicked.connect(self._start_tunnel)
+        self._stop_btn.clicked.connect(self._stop_tunnel)
+        self._add_btn.clicked.connect(self._add_endpoint)
+        self._edit_btn.clicked.connect(self._edit_endpoint)
+        self._delete_btn.clicked.connect(self._delete_endpoint)
+        self._test_btn.clicked.connect(self._test_selected)
+        self._test_all_btn.clicked.connect(self._test_all)
+        self._set_active_btn.clicked.connect(self._set_active_from_selection)
+        self._copy_btn.clicked.connect(self._copy_address)
+        self._sys_proxy_check.toggled.connect(self._on_sys_proxy_toggled)
+        self._port_spin.valueChanged.connect(self._on_port_changed)
+
+        self._refresh_table()
+        self._refresh_status_badge()
+        # Initialize sys-proxy check to current Windows state
+        enabled, _server = SystemProxyManager.status()
+        self._sys_proxy_check.blockSignals(True)
+        self._sys_proxy_check.setChecked(enabled)
+        self._sys_proxy_check.blockSignals(False)
+
+    # ---------- lifecycle ----------
+    def on_shown(self) -> None:
+        self._status_timer.start()
+        self._refresh_status_badge()
+
+    def on_hidden(self) -> None:
+        self._status_timer.stop()
+
+    # ---------- state ----------
+    def _save_state(self) -> None:
+        self._state.local_port = int(self._port_spin.value())
+        self._store.save(self._state)
+
+    def _find_by_id(self, endpoint_id: str) -> GameTunnelEndpoint | None:
+        for ep in self._state.endpoints:
+            if ep.id == endpoint_id:
+                return ep
+        return None
+
+    def _selected_endpoint(self) -> GameTunnelEndpoint | None:
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        return self._find_by_id(item.data(Qt.ItemDataRole.UserRole))
+
+    # ---------- rendering ----------
+    def _refresh_table(self) -> None:
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(self._state.endpoints))
+        for row, ep in enumerate(self._state.endpoints):
+            cells = [
+                ep.region,
+                ep.label,
+                f"{ep.host}:{ep.port}",
+                ep.protocol,
+                "",
+                "✓" if ep.id == self._state.active_id else "",
+            ]
+            for col, value in enumerate(cells):
+                item = QTableWidgetItem()
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, ep.id)
+                if col == 4:
+                    # Ping — numeric sort via setData
+                    ping = self._state.ping_cache.get(ep.id)
+                    if ping is None:
+                        item.setText("—")
+                        item.setData(Qt.ItemDataRole.EditRole, 10_000_000.0)
+                    else:
+                        item.setText(f"{ping:.0f}")
+                        item.setData(Qt.ItemDataRole.EditRole, float(ping))
+                else:
+                    item.setText(str(value))
+                if ep.id == self._state.active_id:
+                    item.setForeground(QColor("#f6c046"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                self._table.setItem(row, col, item)
+        self._table.setSortingEnabled(True)
+
+    def _refresh_status_badge(self) -> None:
+        status = self._relay.status()
+        active = self._find_by_id(self._state.active_id)
+        if status["running"]:
+            bytes_in_mb = status["bytes_in"] / (1024 * 1024)
+            bytes_out_mb = status["bytes_out"] / (1024 * 1024)
+            target = status["target"] or "—"
+            self._status_label.setText(
+                f"● Активен: {status['bound']} → {target}  ·  "
+                f"соединений: {status['connections']}  ·  "
+                f"↑{bytes_out_mb:.2f} MB / ↓{bytes_in_mb:.2f} MB"
+            )
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(True)
+        else:
+            active_hint = active.label if active else "не выбран"
+            self._status_label.setText(f"○ Туннель остановлен  ·  активный endpoint: {active_hint}")
+            self._start_btn.setEnabled(True)
+            self._stop_btn.setEnabled(False)
+        self._stats_label.setText(f"Endpoints: {len(self._state.endpoints)}  ·  файл: {self._store.path}")
+
+    # ---------- tunnel control ----------
+    def _start_tunnel(self) -> None:
+        active = self._find_by_id(self._state.active_id)
+        if active is None:
+            if self._state.endpoints:
+                active = self._state.endpoints[0]
+                self._state.active_id = active.id
+                self._save_state()
+                self._refresh_table()
+            else:
+                QMessageBox.information(self, "Нет endpoint'ов", "Сначала добавь хотя бы один endpoint.")
+                return
+        local_port = int(self._port_spin.value())
+        ok, message = self._relay.start(local_port, active.host, active.port)
+        self._on_status(message)
+        if ok and self._sys_proxy_check.isChecked():
+            SystemProxyManager.enable("127.0.0.1", local_port)
+        self._refresh_status_badge()
+
+    def _stop_tunnel(self) -> None:
+        ok, message = self._relay.stop()
+        self._on_status(message)
+        if self._sys_proxy_check.isChecked():
+            SystemProxyManager.disable()
+        self._refresh_status_badge()
+
+    # ---------- CRUD ----------
+    def _add_endpoint(self) -> None:
+        dialog = _EndpointEditDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        label, region, host, port, protocol, notes = dialog.get_values()
+        if not host:
+            QMessageBox.warning(self, "Ошибка", "Хост обязателен")
+            return
+        ep = GameTunnelEndpoint.new(label or f"{host}:{port}", region or "—", host, port, protocol, notes)
+        self._state.endpoints.append(ep)
+        if not self._state.active_id:
+            self._state.active_id = ep.id
+        self._save_state()
+        self._refresh_table()
+        self._on_status(f"Добавлен endpoint: {ep.label}")
+
+    def _edit_endpoint(self) -> None:
+        ep = self._selected_endpoint()
+        if ep is None:
+            return
+        dialog = _EndpointEditDialog(self, ep)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        label, region, host, port, protocol, notes = dialog.get_values()
+        if not host:
+            QMessageBox.warning(self, "Ошибка", "Хост обязателен")
+            return
+        ep.label = label or f"{host}:{port}"
+        ep.region = region or "—"
+        ep.host = host
+        ep.port = port
+        ep.protocol = protocol
+        ep.notes = notes
+        self._save_state()
+        self._refresh_table()
+        self._on_status(f"Обновлён endpoint: {ep.label}")
+
+    def _delete_endpoint(self) -> None:
+        ep = self._selected_endpoint()
+        if ep is None:
+            return
+        confirm = QMessageBox.question(
+            self, "Удалить endpoint?", f"Удалить «{ep.label}» ({ep.host}:{ep.port})?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._state.endpoints = [e for e in self._state.endpoints if e.id != ep.id]
+        self._state.ping_cache.pop(ep.id, None)
+        if self._state.active_id == ep.id:
+            self._state.active_id = self._state.endpoints[0].id if self._state.endpoints else ""
+        self._save_state()
+        self._refresh_table()
+        self._on_status(f"Удалён endpoint: {ep.label}")
+
+    # ---------- ping ----------
+    def _test_selected(self) -> None:
+        ep = self._selected_endpoint()
+        if ep is None:
+            return
+        self._on_status(f"Пинг {ep.host}:{ep.port}...")
+        ms = measure_tcp_ping(ep.host, ep.port)
+        if ms is None:
+            self._state.ping_cache.pop(ep.id, None)
+            self._on_status(f"{ep.label}: недоступен")
+        else:
+            self._state.ping_cache[ep.id] = ms
+            self._on_status(f"{ep.label}: {ms:.0f} мс")
+        self._save_state()
+        self._refresh_table()
+
+    def _test_all(self) -> None:
+        self._on_status(f"Тест {len(self._state.endpoints)} endpoint'ов...")
+        for ep in self._state.endpoints:
+            ms = measure_tcp_ping(ep.host, ep.port, timeout=1.5)
+            if ms is None:
+                self._state.ping_cache.pop(ep.id, None)
+            else:
+                self._state.ping_cache[ep.id] = ms
+            QApplication.processEvents()
+        self._save_state()
+        self._refresh_table()
+        best = min(
+            (ep for ep in self._state.endpoints if ep.id in self._state.ping_cache),
+            key=lambda e: self._state.ping_cache[e.id],
+            default=None,
+        )
+        if best is not None:
+            self._on_status(f"Лучший: {best.label} ({self._state.ping_cache[best.id]:.0f} мс)")
+        else:
+            self._on_status("Ни один endpoint не ответил")
+
+    # ---------- actions ----------
+    def _set_active_from_selection(self) -> None:
+        ep = self._selected_endpoint()
+        if ep is None:
+            return
+        self._state.active_id = ep.id
+        self._save_state()
+        self._refresh_table()
+        self._on_status(f"Активный endpoint: {ep.label}")
+        if self._relay.is_running():
+            self._relay.stop()
+            self._start_tunnel()
+
+    def _copy_address(self) -> None:
+        ep = self._selected_endpoint()
+        if ep is None:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(f"{ep.host}:{ep.port}")
+            self._on_status(f"Скопировано: {ep.host}:{ep.port}")
+
+    def _on_sys_proxy_toggled(self, checked: bool) -> None:
+        if checked:
+            local_port = int(self._port_spin.value())
+            ok, msg = SystemProxyManager.enable("127.0.0.1", local_port)
+        else:
+            ok, msg = SystemProxyManager.disable()
+        self._on_status(msg)
+        if not ok:
+            self._sys_proxy_check.blockSignals(True)
+            self._sys_proxy_check.setChecked(not checked)
+            self._sys_proxy_check.blockSignals(False)
+
+    def _on_port_changed(self, value: int) -> None:
+        self._state.local_port = int(value)
+        self._save_state()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        try:
+            self._relay.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+class CompanionTabPage(QWidget):
+    def __init__(
+        self,
+        on_status: Callable[[str], None],
+        get_companion: Callable[[], "CompanionWindow | None"],
+        toggle_companion: Callable[[bool], None],
+    ) -> None:
+        super().__init__()
+        self._on_status = on_status
+        self._get_companion = get_companion
+        self._toggle_companion = toggle_companion
+        self._store = GeneralSettingsStore()
+        settings = self._store.load_settings()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(10)
+
+        # --- Header ---
+        title = QLabel("Анимированный аниме-компаньон")
+        title.setObjectName("SectionTitle")
+        root.addWidget(title)
+        intro = QLabel(
+            "Маленький чиби-талисман живёт на рабочем столе и реагирует на события: "
+            "подмигивает при входе в игру, пугается перегрева CPU, засыпает в простое. "
+            "Рисуется программно — использует цвета активной темы."
+        )
+        intro.setWordWrap(True)
+        intro.setProperty("role", "ref_section")
+        root.addWidget(intro)
+
+        # --- Toggle row ---
+        toggle_row = QHBoxLayout()
+        self._enable_check = QCheckBox("Включить компаньона")
+        self._enable_check.setChecked(settings.companion_enabled)
+        toggle_row.addWidget(self._enable_check)
+        toggle_row.addStretch(1)
+        root.addLayout(toggle_row)
+
+        # --- Positioning + size grid ---
+        grid_box = QGroupBox("Размещение и внешний вид")
+        grid_layout = QGridLayout(grid_box)
+        grid_layout.addWidget(QLabel("Положение:"), 0, 0)
+        self._anchor_combo = QComboBox()
+        for key, label in (
+            ("top_left", "Вверху слева"),
+            ("top_right", "Вверху справа"),
+            ("bottom_left", "Внизу слева"),
+            ("bottom_right", "Внизу справа"),
+        ):
+            self._anchor_combo.addItem(label, key)
+        for i in range(self._anchor_combo.count()):
+            if self._anchor_combo.itemData(i) == settings.companion_anchor:
+                self._anchor_combo.setCurrentIndex(i)
+                break
+        grid_layout.addWidget(self._anchor_combo, 0, 1)
+
+        grid_layout.addWidget(QLabel("Размер:"), 1, 0)
+        self._size_slider = QSlider(Qt.Orientation.Horizontal)
+        self._size_slider.setRange(80, 400)
+        self._size_slider.setValue(settings.companion_size)
+        self._size_value = QLabel(f"{settings.companion_size} px")
+        size_row = QHBoxLayout()
+        size_row.addWidget(self._size_slider, 1)
+        size_row.addWidget(self._size_value)
+        grid_layout.addLayout(size_row, 1, 1)
+
+        grid_layout.addWidget(QLabel("Прозрачность:"), 2, 0)
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._opacity_slider.setRange(20, 100)
+        self._opacity_slider.setValue(settings.companion_opacity)
+        self._opacity_value = QLabel(f"{settings.companion_opacity}%")
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(self._opacity_slider, 1)
+        opacity_row.addWidget(self._opacity_value)
+        grid_layout.addLayout(opacity_row, 2, 1)
+        root.addWidget(grid_box)
+
+        # --- Test reactions ---
+        test_box = QGroupBox("Проверить эмоцию")
+        test_layout = QHBoxLayout(test_box)
+        self._test_combo = QComboBox()
+        for state in (
+            CompanionState.IDLE,
+            CompanionState.HAPPY,
+            CompanionState.WINK,
+            CompanionState.SCARED,
+            CompanionState.SLEEPY,
+            CompanionState.EXCITED,
+        ):
+            self._test_combo.addItem(f"{state.value}  ·  {COMPANION_STATE_LABELS[state]}", state)
+        test_layout.addWidget(self._test_combo, 1)
+        self._test_btn = QPushButton("Показать")
+        test_layout.addWidget(self._test_btn)
+        root.addWidget(test_box)
+
+        # --- Custom sprites ---
+        sprites_box = QGroupBox("Кастомные спрайты (PNG)")
+        sprites_layout = QGridLayout(sprites_box)
+        sprites_hint = QLabel(
+            "Положи PNG-файлы в папку: idle.png, happy.png, wink.png, scared.png, "
+            "sleepy.png, excited.png. Если нет — используется встроенная чиби-отрисовка."
+        )
+        sprites_hint.setWordWrap(True)
+        sprites_hint.setProperty("role", "ref_section")
+        sprites_layout.addWidget(sprites_hint, 0, 0, 1, 3)
+        self._sprites_path_edit = QLineEdit()
+        self._sprites_path_edit.setText(settings.companion_sprites_dir)
+        self._sprites_path_edit.setReadOnly(True)
+        self._sprites_pick_btn = QPushButton("Выбрать папку")
+        self._sprites_clear_btn = QPushButton("Сбросить")
+        sprites_layout.addWidget(self._sprites_path_edit, 1, 0)
+        sprites_layout.addWidget(self._sprites_pick_btn, 1, 1)
+        sprites_layout.addWidget(self._sprites_clear_btn, 1, 2)
+        self._sprites_status_label = QLabel(self._sprites_status_text(settings.companion_sprites_dir))
+        self._sprites_status_label.setProperty("role", "ref_section")
+        sprites_layout.addWidget(self._sprites_status_label, 2, 0, 1, 3)
+        root.addWidget(sprites_box)
+
+        # --- AI brain controls ---
+        ai_box = QGroupBox("AI-реплики (Cloudflare Workers AI)")
+        ai_layout = QGridLayout(ai_box)
+        self._ai_enable_check = QCheckBox("Включить AI-реплики в пузыре")
+        self._ai_enable_check.setChecked(settings.companion_ai_enabled)
+        ai_layout.addWidget(self._ai_enable_check, 0, 0, 1, 3)
+        ai_layout.addWidget(QLabel("Cloudflare API-токен:"), 1, 0)
+        self._ai_token_edit = QLineEdit()
+        self._ai_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._ai_token_edit.setPlaceholderText(
+            "Вставь токен — будет сохранён в Windows Credentials (не в файле)"
+        )
+        ai_layout.addWidget(self._ai_token_edit, 1, 1)
+        self._ai_save_btn = QPushButton("Сохранить")
+        ai_layout.addWidget(self._ai_save_btn, 1, 2)
+        self._ai_clear_btn = QPushButton("Удалить токен")
+        self._ai_test_btn = QPushButton("Тест")
+        ai_buttons_row = QHBoxLayout()
+        ai_buttons_row.addWidget(self._ai_clear_btn)
+        ai_buttons_row.addWidget(self._ai_test_btn)
+        ai_buttons_row.addStretch(1)
+        ai_layout.addLayout(ai_buttons_row, 2, 0, 1, 3)
+        token_store = CompanionTokenStore()
+        has_token = token_store.has_token()
+        self._ai_status_label = QLabel(
+            "✅ Токен сохранён в Windows Credentials" if has_token else "⚠ Токен не задан — AI-реплики выключены"
+        )
+        self._ai_status_label.setProperty("role", "ref_section")
+        ai_layout.addWidget(self._ai_status_label, 3, 0, 1, 3)
+        root.addWidget(ai_box)
+
+        # --- Trigger sources info ---
+        triggers = QLabel(
+            "Источники реакций:\n"
+            "• 🎮 Новая игра в фокусе → HAPPY\n"
+            "• 🔥 CPU ≥ 82°C → SCARED\n"
+            "• 💤 Простой ≥ 60 сек → SLEEPY\n"
+            "• 👋 Запуск приложения → WINK\n"
+            "• 🖱 Клик по компаньону → EXCITED"
+        )
+        triggers.setProperty("role", "ref_section")
+        root.addWidget(triggers)
+        root.addStretch(1)
+
+        # --- Wire ---
+        self._enable_check.toggled.connect(self._on_toggle)
+        self._anchor_combo.currentIndexChanged.connect(self._on_anchor_changed)
+        self._size_slider.valueChanged.connect(self._on_size_changed)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self._test_btn.clicked.connect(self._on_test)
+        self._sprites_pick_btn.clicked.connect(self._on_sprites_pick)
+        self._sprites_clear_btn.clicked.connect(self._on_sprites_clear)
+        self._ai_enable_check.toggled.connect(self._on_ai_enabled_changed)
+        self._ai_save_btn.clicked.connect(self._on_ai_save_token)
+        self._ai_clear_btn.clicked.connect(self._on_ai_clear_token)
+        self._ai_test_btn.clicked.connect(self._on_ai_test)
+
+    # ---------- lifecycle ----------
+    def on_shown(self) -> None:
+        pass
+
+    def on_hidden(self) -> None:
+        pass
+
+    # ---------- handlers ----------
+    def _persist(self, **overrides) -> None:
+        s = self._store.load_settings()
+        for k, v in overrides.items():
+            setattr(s, k, v)
+        self._store.save_settings(s)
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._persist(companion_enabled=checked)
+        self._toggle_companion(checked)
+        self._on_status("Компаньон включён" if checked else "Компаньон выключен")
+
+    def _on_anchor_changed(self) -> None:
+        anchor = self._anchor_combo.currentData()
+        self._persist(companion_anchor=anchor)
+        window = self._get_companion()
+        if window is not None:
+            window.set_anchor(anchor)
+
+    def _on_size_changed(self, value: int) -> None:
+        self._size_value.setText(f"{value} px")
+        self._persist(companion_size=int(value))
+        window = self._get_companion()
+        if window is not None:
+            window.set_size(int(value))
+            window.set_anchor(self._anchor_combo.currentData())
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self._opacity_value.setText(f"{value}%")
+        self._persist(companion_opacity=int(value))
+        window = self._get_companion()
+        if window is not None:
+            window.set_opacity_percent(int(value))
+
+    def _on_test(self) -> None:
+        window = self._get_companion()
+        if window is None:
+            self._on_status("Сначала включи компаньона — тогда можно тестировать эмоции")
+            return
+        state = self._test_combo.currentData()
+        if state is None:
+            return
+        window.character.set_state(state)
+        self._on_status(f"Эмоция: {COMPANION_STATE_LABELS[state]}")
+
+    # ---------- sprites ----------
+    def _sprites_status_text(self, directory: str) -> str:
+        if not directory:
+            return "Используется встроенная отрисовка"
+        p = Path(directory)
+        if not p.is_dir():
+            return "⚠ Папка не найдена — используется встроенная отрисовка"
+        expected = ("idle.png", "happy.png", "wink.png", "scared.png", "sleepy.png", "excited.png")
+        found = [name for name in expected if (p / name).is_file()]
+        if not found:
+            return "⚠ Нет PNG — используется встроенная отрисовка"
+        return f"✅ Найдено {len(found)}/6: {', '.join(f[:-4] for f in found)}"
+
+    def _on_sprites_pick(self) -> None:
+        current = self._sprites_path_edit.text() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Папка со спрайтами компаньона", current)
+        if not chosen:
+            return
+        self._sprites_path_edit.setText(chosen)
+        self._persist(companion_sprites_dir=chosen)
+        self._sprites_status_label.setText(self._sprites_status_text(chosen))
+        window = self._get_companion()
+        if window is not None:
+            window.character.set_sprites_dir(chosen)
+        self._on_status(f"Папка спрайтов: {chosen}")
+
+    def _on_sprites_clear(self) -> None:
+        self._sprites_path_edit.setText("")
+        self._persist(companion_sprites_dir="")
+        self._sprites_status_label.setText(self._sprites_status_text(""))
+        window = self._get_companion()
+        if window is not None:
+            window.character.set_sprites_dir(None)
+        self._on_status("Сброшено — встроенная отрисовка")
+
+    # ---------- AI ----------
+    def _on_ai_enabled_changed(self, checked: bool) -> None:
+        self._persist(companion_ai_enabled=checked)
+        self._on_status("AI-реплики включены" if checked else "AI-реплики выключены")
+
+    def _on_ai_save_token(self) -> None:
+        token = self._ai_token_edit.text().strip()
+        if not token:
+            self._on_status("Введи токен в поле")
+            return
+        brain = CompanionAiBrain()
+        ok, msg = brain.set_token(token)
+        self._on_status(msg)
+        if ok:
+            self._ai_token_edit.clear()
+            self._ai_status_label.setText("✅ Токен сохранён в Windows Credentials")
+
+    def _on_ai_clear_token(self) -> None:
+        brain = CompanionAiBrain()
+        brain.set_token("")
+        self._ai_status_label.setText("⚠ Токен не задан — AI-реплики выключены")
+        self._on_status("Токен очищен")
+
+    def _on_ai_test(self) -> None:
+        brain = CompanionAiBrain()
+        if not brain.is_configured():
+            self._on_status("Сначала сохрани токен")
+            return
+        window = self._get_companion()
+
+        def _done(state, phrase):
+            self._on_status(f"AI ответила: «{phrase}»")
+            if window is not None:
+                QTimer.singleShot(0, lambda: window.character.set_bubble_text(phrase))
+
+        self._on_status("Запрос к Cloudflare AI…")
+        brain.generate_async(CompanionState.HAPPY, _done)
+
 
 def _animate_page_fade(page: QWidget) -> None:
     effect = QGraphicsOpacityEffect(page)
@@ -5812,6 +7303,8 @@ def build_ui(
     apply_window_settings: Callable[[GeneralSettings], None] | None = None,
     elevation_manager: _ElevationManagerProtocol | None = None,
     bridge_sink: Callable[[UiBridge], None] | None = None,
+    get_companion: Callable[[], "CompanionWindow | None"] | None = None,
+    toggle_companion: Callable[[bool], None] | None = None,
 ) -> QWidget:
     base_status = on_status if on_status is not None else (lambda _: None)
     settings = initial_settings or GeneralSettingsStore().load_settings()
@@ -6017,6 +7510,19 @@ def build_ui(
             lifecycle_pages[index] = page
         elif tab.id == "clipboard_manager":
             page = ClipboardTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
+        elif tab.id == "screenshot_manager":
+            page = ScreenshotManagerTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
+        elif tab.id == "game_tunnel":
+            page = GameTunnelTabPage(lambda message: emit_status(message, False))
+            lifecycle_pages[index] = page
+        elif tab.id == "companion":
+            page = CompanionTabPage(
+                lambda message: emit_status(message, False),
+                get_companion or (lambda: None),
+                toggle_companion or (lambda _enabled: None),
+            )
             lifecycle_pages[index] = page
         elif tab.id == "analytics":
             page = AnalyticsTabPage(lambda message: emit_status(message, False), analytics_service)
@@ -6231,6 +7737,8 @@ class LoliLendWindow(QMainWindow):
         self._tray_fps_overlay_action: QAction | None = None
         self._tray_proxy_action: QAction | None = None
         self._explicit_exit = False
+        self._companion_window: CompanionWindow | None = None
+        self._companion_controller: CompanionController | None = None
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(_application_icon(self))
@@ -6245,6 +7753,8 @@ class LoliLendWindow(QMainWindow):
                 self._apply_window_settings,
                 elevation_manager=self._elevation_manager,
                 bridge_sink=self._set_ui_bridge,
+                get_companion=self._get_companion_window,
+                toggle_companion=self._toggle_companion,
             )
         )
         self._apply_window_settings(self._settings)
@@ -6266,10 +7776,58 @@ class LoliLendWindow(QMainWindow):
         opacity = 0.74 + (max(0, min(100, settings.brightness)) / 100.0) * 0.26
         self.setWindowOpacity(max(0.74, min(1.0, opacity)))
         self.statusBar().setVisible(settings.show_status_bar)
+        _apply_panel_shadows(self, settings.visual_theme)
         self._update_tray_menu_actions()
         self._update_tray_tooltip()
         if self._ui_bridge is not None:
             self._ui_bridge.set_theme(settings.visual_theme)
+        self._sync_companion_from_settings(settings)
+
+    # ---------- companion ----------
+    def _get_companion_window(self) -> "CompanionWindow | None":
+        return self._companion_window
+
+    def _toggle_companion(self, enabled: bool) -> None:
+        if enabled:
+            self._ensure_companion()
+        else:
+            self._destroy_companion()
+
+    def _ensure_companion(self) -> None:
+        if self._companion_window is None:
+            self._companion_window = CompanionWindow()
+        win = self._companion_window
+        win.set_size(self._settings.companion_size)
+        win.set_opacity_percent(self._settings.companion_opacity)
+        win.set_anchor(self._settings.companion_anchor)
+        win.character.set_palette_from_theme(self._settings.visual_theme)
+        win.character.set_sprites_dir(self._settings.companion_sprites_dir or None)
+        win.show()
+        if self._companion_controller is None:
+            self._companion_controller = CompanionController(win)
+            if self._settings.companion_ai_enabled:
+                try:
+                    brain = CompanionAiBrain()
+                    if brain.is_configured():
+                        self._companion_controller.attach_brain(brain)
+                except Exception:
+                    pass
+        self._companion_controller.start()
+
+    def _destroy_companion(self) -> None:
+        if self._companion_controller is not None:
+            self._companion_controller.stop()
+        if self._companion_window is not None:
+            self._companion_window.hide()
+
+    def _sync_companion_from_settings(self, settings: GeneralSettings) -> None:
+        if settings.companion_enabled:
+            self._ensure_companion()
+        else:
+            self._destroy_companion()
+        if self._companion_window is not None:
+            self._companion_window.character.set_palette_from_theme(settings.visual_theme)
+            self._companion_window.character.set_sprites_dir(settings.companion_sprites_dir or None)
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if event.type() == QEvent.Type.WindowStateChange:

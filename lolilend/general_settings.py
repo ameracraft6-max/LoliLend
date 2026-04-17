@@ -99,6 +99,16 @@ class GeneralSettings:
     netspeed_overlay_opacity: int = 88
     clipboard_history_size: int = 50
     launcher_design: str = "v1"
+    screenshot_hotkey: str = "Ctrl+Alt+S"
+    screenshot_mode: str = "window"  # "window" or "fullscreen"
+    screenshot_dir: str = ""  # empty = %APPDATA%/LoliLend/screenshots
+    screenshot_copy_to_clipboard: bool = True
+    companion_enabled: bool = False
+    companion_size: int = 140
+    companion_opacity: int = 95
+    companion_anchor: str = "bottom_right"
+    companion_sprites_dir: str = ""
+    companion_ai_enabled: bool = True
 
 
 VALID_CROSSHAIR_STYLES: frozenset[str] = frozenset({
@@ -354,6 +364,20 @@ class GeneralSettingsStore:
         settings.launcher_design = str(settings_raw.get("launcher_design", settings.launcher_design))
         if settings.launcher_design not in ("v1", "v1.3AL", "v2.0AL"):
             settings.launcher_design = "v1"
+        settings.screenshot_hotkey = str(settings_raw.get("screenshot_hotkey", settings.screenshot_hotkey)).strip()
+        settings.screenshot_mode = str(settings_raw.get("screenshot_mode", settings.screenshot_mode))
+        if settings.screenshot_mode not in {"window", "fullscreen"}:
+            settings.screenshot_mode = "window"
+        settings.screenshot_dir = str(settings_raw.get("screenshot_dir", settings.screenshot_dir))
+        settings.screenshot_copy_to_clipboard = bool(settings_raw.get("screenshot_copy_to_clipboard", settings.screenshot_copy_to_clipboard))
+        settings.companion_enabled = bool(settings_raw.get("companion_enabled", settings.companion_enabled))
+        settings.companion_size = self._clamp_int(settings_raw.get("companion_size", settings.companion_size), 80, 400)
+        settings.companion_opacity = self._clamp_int(settings_raw.get("companion_opacity", settings.companion_opacity), 20, 100)
+        settings.companion_anchor = str(settings_raw.get("companion_anchor", settings.companion_anchor))
+        if settings.companion_anchor not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+            settings.companion_anchor = "bottom_right"
+        settings.companion_sprites_dir = str(settings_raw.get("companion_sprites_dir", settings.companion_sprites_dir))
+        settings.companion_ai_enabled = bool(settings_raw.get("companion_ai_enabled", settings.companion_ai_enabled))
         return settings
 
     def save_settings(self, settings: GeneralSettings) -> None:

@@ -31,6 +31,10 @@ Thumbs.db
 bot/
 .claude/
 
+# Local dev tools/scratch
+tools/
+_test_*.py
+
 # Build infrastructure (kept locally, not in repo)
 *.spec
 build_*.ps1

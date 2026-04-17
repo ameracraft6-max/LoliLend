@@ -182,6 +182,24 @@ tabs_schema: list[TabSpec] = [
         sections=[],
     ),
     TabSpec(
+        id="screenshot_manager",
+        title="Скриншоты",
+        icon="screenshot_manager",
+        sections=[],
+    ),
+    TabSpec(
+        id="game_tunnel",
+        title="Игровой туннель",
+        icon="game_tunnel",
+        sections=[],
+    ),
+    TabSpec(
+        id="companion",
+        title="Компаньон",
+        icon="companion",
+        sections=[],
+    ),
+    TabSpec(
         id="analytics",
         title="Analytics",
         icon="analytics",

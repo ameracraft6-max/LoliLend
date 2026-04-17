@@ -1,0 +1,11 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#dfe5ef" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Camera body -->
+  <rect x="8" y="18" width="48" height="34" rx="4"/>
+  <!-- Viewfinder top -->
+  <path d="M24 18 l3 -6 h10 l3 6"/>
+  <!-- Lens -->
+  <circle cx="32" cy="36" r="9"/>
+  <circle cx="32" cy="36" r="4"/>
+  <!-- Flash / indicator -->
+  <circle cx="47" cy="26" r="1.2" fill="#dfe5ef"/>
+</svg>
